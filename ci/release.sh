@@ -16,5 +16,5 @@ cargo clippy --locked --all-targets -- -D warnings
     aarch64-apple-darwin x86_64-pc-windows-msvc aarch64-pc-windows-msvc
 python3 tests/integration.py
 bash tests/linux-smoke.sh
+rm -rf dist/artifacts
 python3 package.py --archive dist/artifacts
-python3 package.py --profile onedev --archive dist/artifacts

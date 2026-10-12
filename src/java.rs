@@ -85,14 +85,17 @@ pub fn command(config: &Config, arguments: &[String], port: u16, token: &str) ->
     }
     cmd.arg("-cp").arg(std::env::join_paths(classpath)?);
     // Launch any Java main class through the lifecycle bridge; no JSW JNI dependency.
-    cmd.env("ONEDEV_WRAPPER_PORT", port.to_string())
-        .env("ONEDEV_WRAPPER_TOKEN", token);
-    cmd.arg("org.tanukisoftware.wrapper.WrapperSimpleApp");
+    cmd.env("SERVICEWRAPPER_PORT", port.to_string())
+        .env("SERVICEWRAPPER_TOKEN", token);
+    cmd.arg("org.servicewrapper.WrapperSimpleApp");
     let main = config.get(
         "wrapper.java.mainclass",
-        "org.tanukisoftware.wrapper.WrapperSimpleApp",
+        "org.servicewrapper.WrapperSimpleApp",
     );
-    if main != "org.tanukisoftware.wrapper.WrapperSimpleApp" {
+    if !matches!(
+        main,
+        "org.servicewrapper.WrapperSimpleApp" | "org.tanukisoftware.wrapper.WrapperSimpleApp"
+    ) {
         cmd.arg(main);
     }
     cmd.args(config.numbered("wrapper.app.parameter."))
@@ -172,7 +175,7 @@ mod tests {
     }
     #[test]
     fn classpath_patterns() {
-        assert!(wildcard("*.jar", "one dev.jar"));
+        assert!(wildcard("*.jar", "java app.jar"));
         assert!(!wildcard("*.jar", "x.jar.bak"));
         assert!(wildcard("lib-?-*.jar", "lib-a-one.jar"));
     }

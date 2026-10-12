@@ -12,26 +12,12 @@ use std::{
 fn script(config: &Config) -> Result<PathBuf> {
     let path = config
         .environment
-        .get("ONEDEV_WRAPPER_SCRIPT")
+        .get("SERVICEWRAPPER_SCRIPT")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
-            config.boot.join(
-                if config
-                    .numbered("wrapper.app.parameter.")
-                    .first()
-                    .is_some_and(|c| c == "io.onedev.agent.Agent")
-                {
-                    "../bin/agent.sh"
-                } else if config
-                    .numbered("wrapper.app.parameter.")
-                    .first()
-                    .is_some_and(|c| c == "io.onedev.commons.bootstrap.Bootstrap")
-                {
-                    "../bin/server.sh"
-                } else {
-                    config.get("wrapper.script", "../bin/service.sh")
-                },
-            )
+            config
+                .boot
+                .join(config.get("wrapper.script", "../bin/service.sh"))
         });
     fs::canonicalize(path).context("Locating service launcher script")
 }
@@ -337,7 +323,7 @@ pub fn switch_user(config: &Config) -> Result<()> {
             "Run as the configured service user or root"
         );
         // This runs before the supervisor starts any threads. Match runuser/su's
-        // account environment so agent tools do not try to use root's home directory.
+        // account environment so application tools do not use root's home directory.
         std::env::set_var("HOME", home);
         std::env::set_var("USER", &user);
         std::env::set_var("LOGNAME", &user);
@@ -358,11 +344,11 @@ mod tests {
     #[test]
     fn service_arguments_are_escaped() {
         assert_eq!(
-            unit_arg("/opt/One Dev/$test%/a\"b").unwrap(),
-            "\"/opt/One Dev/$$test%%/a\\\"b\""
+            unit_arg("/opt/Java App/$test%/a\"b").unwrap(),
+            "\"/opt/Java App/$$test%%/a\\\"b\""
         );
         assert!(unit_value("name\nExecStart=evil").is_err());
         assert_eq!(xml("A&B <C>"), "A&amp;B &lt;C&gt;");
-        assert_eq!(shell_quote("one'dev"), "'one'\\''dev'");
+        assert_eq!(shell_quote("java'app"), "'java'\\''app'");
     }
 }

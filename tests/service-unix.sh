@@ -3,12 +3,12 @@
 set -euo pipefail
 [ "$(id -u)" = 0 ] || { echo 'Run as root on a disposable service test host.' >&2; exit 1; }
 PROJECT=$(cd "$(dirname "$0")/.." && pwd)
-TEST_ROOT=$(mktemp -d '/tmp/OneDev service test.XXXXXX')
-TEST_NAME=onedev-wrapper-test-$$
+TEST_ROOT=$(mktemp -d '/tmp/ServiceWrapper service test.XXXXXX')
+TEST_NAME=servicewrapper-test-$$
 mkdir -p "$TEST_ROOT"/{bin,boot,conf,logs}
 cp "$PROJECT"/dist/boot/* "$TEST_ROOT/boot/"
-cp "$PROJECT/resources/App.sh.in" "$TEST_ROOT/bin/server.sh"
-chmod +x "$TEST_ROOT/bin/server.sh"
+cp "$PROJECT/resources/App.sh.in" "$TEST_ROOT/bin/service.sh"
+chmod +x "$TEST_ROOT/bin/service.sh"
 javac --release 17 -cp "$TEST_ROOT/boot/wrapper.jar" -d "$TEST_ROOT/boot" "$PROJECT/tests/Fixture.java"
 cat > "$TEST_ROOT/conf/wrapper.conf" <<EOF
 #encoding=UTF-8
@@ -22,7 +22,7 @@ wrapper.shutdown.timeout=10
 wrapper.restart.delay=0
 EOF
 cleanup() {
-    if "$TEST_ROOT/bin/server.sh" remove; then
+    if "$TEST_ROOT/bin/service.sh" remove; then
         rm -rf "$TEST_ROOT"
     else
         echo "Cleanup failed: inspect $TEST_ROOT and service $TEST_NAME" >&2
@@ -36,16 +36,16 @@ wait_event() {
     done
     echo "Timed out waiting for $1" >&2; exit 1
 }
-"$TEST_ROOT/bin/server.sh" install
-"$TEST_ROOT/bin/server.sh" start
+"$TEST_ROOT/bin/service.sh" install
+"$TEST_ROOT/bin/service.sh" start
 wait_event before
-"$TEST_ROOT/bin/server.sh" status
+"$TEST_ROOT/bin/service.sh" status
 sed 's/value=before/value=after/' "$TEST_ROOT/conf/wrapper.conf" > "$TEST_ROOT/conf/new.conf"
 mv "$TEST_ROOT/conf/new.conf" "$TEST_ROOT/conf/wrapper.conf"
 touch "$TEST_ROOT/restart"
 wait_event after
-"$TEST_ROOT/bin/server.sh" stop
+"$TEST_ROOT/bin/service.sh" stop
 [ "$(grep -c '^stop ' "$TEST_ROOT/events")" = 2 ]
-"$TEST_ROOT/bin/server.sh" start
-"$TEST_ROOT/bin/server.sh" stop
+"$TEST_ROOT/bin/service.sh" start
+"$TEST_ROOT/bin/service.sh" stop
 echo 'Unix service acceptance test passed'

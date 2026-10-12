@@ -27,7 +27,7 @@ if [ -n "$FILES_TO_SOURCE" ]; then
     done
 fi
 export RUN_AS_USER=${RUN_AS_USER:-}
-export ONEDEV_WRAPPER_SCRIPT=$SCRIPT
+export SERVICEWRAPPER_SCRIPT=$SCRIPT
 if [ -n "${PLIST_DOMAIN:-}" ]; then export PLIST_DOMAIN; fi
 
 case "$(uname -s):$(uname -m)" in

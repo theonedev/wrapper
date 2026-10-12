@@ -1,7 +1,7 @@
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
-import io.onedev.servicewrapper.WrapperManager;
+import org.servicewrapper.WrapperManager;
 
 public class Fixture {
     public static void main(String[] args) throws Exception {
@@ -38,10 +38,18 @@ public class Fixture {
             return;
         }
         for (;;) {
-            if (Files.deleteIfExists(root.resolve("restart")))
-                WrapperManager.restartAndReturn();
-            if (Files.deleteIfExists(root.resolve("stop")))
-                WrapperManager.stopAndReturn(0);
+            if (Files.deleteIfExists(root.resolve("restart"))) {
+                if (Boolean.getBoolean("fixture.legacy_api"))
+                    org.tanukisoftware.wrapper.WrapperManager.restartAndReturn();
+                else
+                    WrapperManager.restartAndReturn();
+            }
+            if (Files.deleteIfExists(root.resolve("stop"))) {
+                if (Boolean.getBoolean("fixture.legacy_api"))
+                    org.tanukisoftware.wrapper.WrapperManager.stopAndReturn(0);
+                else
+                    WrapperManager.stopAndReturn(0);
+            }
             Thread.sleep(50);
         }
     }

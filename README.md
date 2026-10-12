@@ -7,8 +7,7 @@ service settings are configured in `conf/wrapper.conf`.
 
 This standalone project is maintained at
 [code.onedev.io/onedev/servicewrapper](https://code.onedev.io/onedev/servicewrapper).
-It has no OneDev application dependency. OneDev server/agent packaging is an
-optional integration; other Java applications use the generic distribution.
+It works with any Java application exposing a main method.
 
 ## Use with a Java application
 
@@ -33,7 +32,7 @@ for example to `my-app.sh` and `my-app.bat`; the service name comes from the con
 Prefer `wrapper.app.parameter.N` for arguments that should also apply at boot.
 
 Applications that need to request their own restart or stop can compile against
-`boot/wrapper.jar` and call `io.onedev.servicewrapper.WrapperManager.restartAndReturn()`
+`boot/wrapper.jar` and call `org.servicewrapper.WrapperManager.restartAndReturn()`
 or `stopAndReturn(int)`. The equivalent `org.tanukisoftware.wrapper.WrapperManager`
 methods and `WrapperSimpleApp` main class remain available for JSW compatibility.
 The bridge is independently implemented and contains no Tanuki code or JNI library.
@@ -50,15 +49,13 @@ See the compatibility limits below before migrating existing JSW integrations.
 | Linux arm64 | `aarch64-unknown-linux-musl` | `wrapper-linux-arm-64` |
 
 Linux executables are statically linked with musl, and Windows executables use the
-static C runtime. The Java application still needs Java 17 or newer. The old
-`wrapper-macosx-universal-64` filename is also supplied in the OneDev profile as an Apple Silicon alias;
-Intel macOS and 32-bit systems are not supported.
+static C runtime. The Java application still needs Java 17 or newer. Intel macOS
+and 32-bit systems are not supported.
 
 ## Commands
 
 Generic entry points are `bin/service.sh` on Unix and `bin/service.bat` on Windows.
-The OneDev integration retains `bin/server.sh` / `bin/agent.sh` and their `.bat` counterparts. The Bash launcher also recognizes
-Git Bash/MSYS on supported Windows architectures.
+The Bash launcher also recognizes Git Bash/MSYS on supported Windows architectures.
 
 ```sh
 bin/service.sh install
@@ -71,12 +68,12 @@ bin/service.sh console
 ```
 
 `installstart` installs and starts. `condrestart` restarts only a running instance.
-Unix additionally supports `dump` to request a JVM thread dump. Application arguments preserve boundaries, spaces, and exit codes. Additional
-arguments do not disable service crash recovery. To create a one-shot command
+Unix additionally supports `dump` to request a JVM thread dump. Application
+arguments preserve boundaries, spaces, and exit codes. Additional arguments do not
+disable service crash recovery. To create a one-shot command
 launcher, change its `--script` argument to `--command`: its filename is prepended
 to the application's arguments and crash retries are disabled. Direct invocation
-also accepts `wrapper.restart.disabled=TRUE`. OneDev's existing Docker maintenance
-entry point `boot/wrapper-linux-* conf/wrapper.conf -- upgrade ...` is supported.
+also accepts `wrapper.restart.disabled=TRUE` before `--` for one-shot invocations.
 
 Service registration uses Windows SCM, Linux systemd (or SysV when systemd is not
 running), and macOS launchd. Installation/removal require administrator/root access;
@@ -84,14 +81,13 @@ ordinary console and detached Unix operation do not. Unix `start` without servic
 registration starts a detached supervisor. Windows `start` requires installation.
 Status returns 0 for an active instance and 3 when stopped/not installed.
 
-Existing systemd units invoking `server.sh start sysd` and launchd plists invoking
-`server.sh launchdinternal` remain supported. macOS retains the existing
+Existing systemd units invoking `service.sh start sysd` and launchd plists invoking
+`service.sh launchdinternal` remain supported. macOS retains the existing
 `org.tanukisoftware.wrapper.<name>` service label. The Windows `-s <config>` service
 entry point and amd64 executable filename remain unchanged. Configuration filenames,
 boot-relative paths, `.shconf`, `RUN_AS_USER`, and `FILES_TO_SOURCE` remain supported.
 
-Stop a deployment before replacing its wrapper files. OneDev-specific packaging
-and existing-agent migration are documented in [the OneDev integration documentation](https://code.onedev.io/onedev/servicewrapper/~files/main/integrations/onedev/README.md).
+Stop a deployment before replacing its wrapper files.
 
 ## Configuration compatibility
 
@@ -105,9 +101,8 @@ settings include:
 - `wrapper.java.library.path.append_system_path`, `wrapper.java.initmemory`,
   `wrapper.java.maxmemory`, and `wrapper.working.dir`.
 - `%ENVIRONMENT_VARIABLE%`, `set.NAME`, `set.default.NAME`, optional `#include`,
-  and `#include.required`. Include paths are relative to `boot`, as in the existing
-  OneDev configuration. Recursive includes are rejected. `##` represents a literal
-  hash in property values; a single hash begins a comment.
+  and `#include.required`. Include paths are relative to `boot`. Recursive includes
+  are rejected. `##` represents a literal hash in property values; a single hash begins a comment.
 - `wrapper.name`, `wrapper.displayname`, `wrapper.description`, and Unix
   `wrapper.daemon.user` (or `RUN_AS_USER` in the launcher/`.shconf`). Unix service
   names use letters, digits, dots, underscores, and hyphens. `wrapper.script` supplies
@@ -136,8 +131,8 @@ settings include:
 The wrapper implements the Java main-class service lifecycle, not the entire JSW product.
 JSW license, JNI, localization, console formatting/title, syslog, CPU/ping monitor,
 auto-bitness, sequence-gap, and console-input settings are inert compatibility
-entries. In particular, no JVM responsiveness/ping watchdog is implemented;
-OneDev's existing configuration disables it. Network-share mappings, output filters,
+entries. In particular, no JVM responsiveness/ping watchdog is implemented.
+Network-share mappings, output filters,
 event/timer actions, interactive services, pause/resume, and arbitrary WrapperListener
 integrations are not implemented. Active share/filter/event/timer properties and
 interactive services fail with a diagnostic instead of being silently accepted.
@@ -169,14 +164,12 @@ rustup target add aarch64-apple-darwin \
   x86_64-unknown-linux-musl aarch64-unknown-linux-musl \
   x86_64-pc-windows-msvc aarch64-pc-windows-msvc
 python3 package.py --archive dist/artifacts
-python3 package.py --profile onedev --archive dist/artifacts
 ```
 
 `build.sh` without arguments builds for the host (using a static musl target on
 Linux). Outputs go to `dist/boot`. `package.py` requires all five
 binaries, verifies their architecture, collects dependency license texts in
-`wrapper.jar`, and writes `SHA256SUMS`. Its generic output is `dist/release/generic`;
-the `onedev` profile produces Maven packaging inputs in `dist/release/onedev`.
+`wrapper.jar`, and writes `SHA256SUMS`. The output is `dist/release/servicewrapper`.
 Use `--destination` to choose another output directory. `--archive` additionally
 writes a versioned archive and SHA-256 file to the supplied directory.
 Vendored license texts include pinned provenance in `licenses/sources.json`.
@@ -184,8 +177,8 @@ Build caches and binaries are ignored; release artifacts are published by CI.
 
 The OneDev **Release** job checks formatting, runs Rust tests and clippy, builds all
 five targets, runs JVM integration and service-account tests on its Linux host,
-and publishes both archives through a `PublishArtifactStep`. It uses `1dev/buildenv`
-and runs manually with `tod build run Release --branch main`. The buildenv project
+and publishes the archive and its checksum through a `PublishArtifactStep`. It
+uses `1dev/buildenv` and runs manually with `tod build run Release --branch main`. The buildenv project
 must first publish the image containing Rust 1.96.1, Zig, cargo-zigbuild,
 cargo-xwin, LLVM, and the macOS SDK. Windows SDK/CRT downloads require network
 access during the first cross-build. No CI step installs tools into a later step's
@@ -198,8 +191,6 @@ cargo test --locked
 cargo clippy --locked --all-targets -- -D warnings
 python3 tests/integration.py
 bash tests/linux-smoke.sh
-# After building the server release (also checks its generated agent distribution):
-python3 integrations/onedev/check_package.py /path/to/server-product/target/onedev-VERSION.zip /path/to/server-product/wrapper
 ```
 
 The integration suite requires localhost sockets and launches only temporary JVM
@@ -213,12 +204,11 @@ mounted read-only. Run each architecture's binary on its corresponding host or e
 restart, shutdown hooks, and removal using a unique fixture service. Run these as
 administrator/root on disposable hosts, never against a production instance.
 
-Validated during this implementation: all five release binaries built; five Rust
-unit tests and eleven macOS JVM integration tests passed; Linux arm64 and amd64
+Validated during this implementation: all five release binaries built; Rust
+unit tests and macOS JVM integration tests passed; Linux arm64 and amd64
 lifecycle and service-account tests passed in containers (amd64 under emulation).
 SysV service installation, restart, shutdown, and removal passed in a disposable
-Linux container. The Maven plugin and server compiled, and clean and incremental
-release packages passed binary, permission, configuration, and obsolete-file checks.
+Linux container.
 Native SCM, launchd, and systemd installation acceptance is a release gate and has
 not been run on this development machine.
 

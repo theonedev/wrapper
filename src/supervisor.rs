@@ -523,16 +523,9 @@ pub fn run(options: &Options, mut state_changed: impl FnMut(State) -> Result<()>
                 if exit == 0 { "SHUTDOWN" } else { "RESTART" },
             ),
         );
-        // Older OneDev Docker entrypoints pass maintenance commands directly.
-        let legacy_maintenance = !options.arguments.is_empty()
-            && config
-                .numbered("wrapper.app.parameter.")
-                .first()
-                .is_some_and(|main| main == "io.onedev.commons.bootstrap.Bootstrap");
         if !restart
             && (action.eq_ignore_ascii_case("SHUTDOWN")
-                || config.boolean("wrapper.restart.disabled", false)
-                || legacy_maintenance)
+                || config.boolean("wrapper.restart.disabled", false))
         {
             log.close();
             return Ok(exit);

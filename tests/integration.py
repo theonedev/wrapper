@@ -30,7 +30,7 @@ class WrapperIntegration(unittest.TestCase):
                         "-d", str(cls.classes), str(PROJECT / "tests/Fixture.java")], check=True)
 
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix="OneDev wrapper space ")
+        self.temp = tempfile.TemporaryDirectory(prefix="ServiceWrapper space ")
         self.root = Path(self.temp.name)
         for directory in ("boot", "bin", "conf", "logs"):
             (self.root / directory).mkdir()
@@ -183,18 +183,18 @@ wrapper.max_failed_invocations=2
     @unittest.skipIf(os.name == "nt", "Bash launcher")
     def test_launcher_and_utility_arguments(self):
         self.config.write_text(self.source + "wrapper.java.additional.20=-Dfixture.mode=once\n")
-        for name, arguments in (("server", ["console", "one two"]), ("agent", ["console", "one two"]), ("my-java-app", ["console", "one two"]), ("upgrade", ["one two"])):
+        for name, arguments in (("service", ["console", "one two"]), ("my-java-app", ["console", "one two"]), ("migrate", ["one two"])):
             path = self.root / "bin" / (name + ".sh")
             launcher = (PROJECT / "resources/App.sh.in").read_text()
-            if name == "upgrade":
+            if name == "migrate":
                 launcher = launcher.replace(" --script ", " --command ")
             path.write_text(launcher)
             path.chmod(0o755)
             result = subprocess.run([str(path), *arguments], cwd="/", capture_output=True, text=True, timeout=10)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn("arg=one two", result.stdout)
-            if name == "upgrade":
-                self.assertIn("arg=upgrade", result.stdout)
+            if name == "migrate":
+                self.assertIn("arg=migrate", result.stdout)
 
     @unittest.skipIf(os.name == "nt", "Bash launcher")
     def test_generic_main_with_arguments_restarts_but_commands_do_not(self):
@@ -211,6 +211,36 @@ wrapper.max_failed_invocations=2
         result = subprocess.run([str(path), "migrate"], capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 9, result.stdout + result.stderr)
         self.assertEqual(len(self.events()), 3, self.events())
+        result = self.command("console", "wrapper.restart.disabled=TRUE", "--", "migrate", check=False, timeout=10)
+        self.assertEqual(result.returncode, 9, result.stdout)
+        self.assertEqual(len(self.events()), 4, self.events())
+
+    def test_generic_and_jsw_bridge_lifecycle(self):
+        for main, legacy in (("org.servicewrapper.WrapperSimpleApp", "false"),
+                             ("org.tanukisoftware.wrapper.WrapperSimpleApp", "true")):
+            with self.subTest(main=main):
+                self.config.write_text(self.source + f"wrapper.java.mainclass={main}\n"
+                                       + f"wrapper.java.additional.20=-Dfixture.legacy_api={legacy}\n")
+                before = len(self.events())
+                process = self.console()
+                self.wait_for(lambda: len(self.events()) == before + 1)
+                (self.root / "restart").touch()
+                self.wait_for(lambda: len(self.events()) == before + 3)
+                (self.root / "stop").touch()
+                self.assertEqual(process.wait(timeout=10), 0)
+                self.assertEqual(len(self.events()), before + 4)
+
+    @unittest.skipIf(os.name == "nt", "Unix launcher paths")
+    def test_launcher_path_is_generic_and_configurable(self):
+        for name in ("service.sh", "my application.sh"):
+            path = self.root / "bin" / name
+            shutil.copy2(PROJECT / "resources/App.sh.in", path)
+            path.chmod(0o755)
+        result = self.command("render-service", timeout=5)
+        self.assertIn(str(self.root / "bin/service.sh"), result.stdout)
+        self.config.write_text(self.source + "wrapper.script=../bin/my application.sh\n")
+        result = self.command("render-service", timeout=5)
+        self.assertIn(str(self.root / "bin/my application.sh"), result.stdout)
 
     def test_include_cycle_fails(self):
         self.config.write_text(self.source + "#include.required ../conf/wrapper.conf\n")

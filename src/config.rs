@@ -103,7 +103,7 @@ impl Config {
                     );
                 }
             } else if !line.is_empty() && !line.starts_with('#') {
-                // Historical OneDev configurations contain an uncommented prose line.
+                // Ignore non-property lines for compatibility with existing configuration files.
                 if line.contains('=') {
                     self.property(&strip_comment(line))?;
                 }

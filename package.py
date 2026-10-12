@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Assemble a generic Java service distribution or OneDev packaging inputs."""
+"""Assemble a generic Java service distribution."""
 import argparse
 import hashlib
 import json
@@ -60,7 +60,6 @@ def notices():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--profile", choices=("generic", "onedev"), default="generic")
     parser.add_argument("--destination", type=Path)
     parser.add_argument("--archive", type=Path, help="Also write a versioned tar.gz and its SHA-256 here")
     args = parser.parse_args()
@@ -68,36 +67,27 @@ def main():
     for name, (kind, machine) in TARGETS.items():
         verify(source / name, kind, machine)
     with zipfile.ZipFile(source / "wrapper.jar") as jar:
-        assert "org/tanukisoftware/wrapper/WrapperManager.class" in jar.namelist()
+        assert "org/servicewrapper/WrapperManager.class" in jar.namelist()
     license_text = notices()
-    destination = (args.destination or ROOT / "dist/release" / args.profile).resolve()
+    destination = (args.destination or ROOT / "dist/release/servicewrapper").resolve()
     boot = destination / "boot"
     boot.mkdir(parents=True, exist_ok=True)
     for name in [*TARGETS, "wrapper.jar"]:
         shutil.copy2(source / name, boot / name)
         (boot / name).chmod(0o644 if name.endswith(".jar") else 0o755)
-    # The jar travels with server and agent downloads; keep all license notices there.
+    # Keep dependency license notices with the bridge in application distributions.
     with zipfile.ZipFile(boot / "wrapper.jar", "a", compression=zipfile.ZIP_DEFLATED) as jar:
         info = zipfile.ZipInfo("META-INF/THIRD-PARTY-LICENSES.txt", date_time=(2026, 1, 1, 0, 0, 0))
         info.compress_type = zipfile.ZIP_DEFLATED
         jar.writestr(info, license_text)
-    if args.profile == "onedev":
-        shutil.copy2(boot / "wrapper-macosx-arm-64", boot / "wrapper-macosx-universal-64")
-        for name in ("App.sh.in", "AppCommand.bat.in"):
-            shutil.copy2(ROOT / "resources" / name, destination / name)
-        for source_name, name in (("App.sh.in", "Command.sh.in"), ("AppCommand.bat.in", "Command.bat.in")):
-            (destination / name).write_text((ROOT / "resources" / source_name).read_text().replace(" --script ", " --command "))
-        shutil.copy2(ROOT / "integrations/onedev/wrapper.conf", destination / "wrapper.conf")
-        shutil.copy2(ROOT / "integrations/onedev/README.md", destination / "README.md")
-    else:
-        for name in ("bin", "conf", "lib", "logs"):
-            (destination / name).mkdir(exist_ok=True)
-        shutil.copy2(ROOT / "resources/App.sh.in", destination / "bin/service.sh")
-        (destination / "bin/service.sh").chmod(0o755)
-        shutil.copy2(ROOT / "resources/AppCommand.bat.in", destination / "bin/service.bat")
-        shutil.copy2(ROOT / "resources/wrapper.conf", destination / "conf/wrapper.conf")
-        for name in ("LICENSE", "README.md"):
-            shutil.copy2(ROOT / name, destination / name)
+    for name in ("bin", "conf", "lib", "logs"):
+        (destination / name).mkdir(exist_ok=True)
+    shutil.copy2(ROOT / "resources/App.sh.in", destination / "bin/service.sh")
+    (destination / "bin/service.sh").chmod(0o755)
+    shutil.copy2(ROOT / "resources/AppCommand.bat.in", destination / "bin/service.bat")
+    shutil.copy2(ROOT / "resources/wrapper.conf", destination / "conf/wrapper.conf")
+    for name in ("LICENSE", "README.md"):
+        shutil.copy2(ROOT / name, destination / name)
     version = tomllib.loads((ROOT / "Cargo.toml").read_text())["package"]["version"]
     (destination / "VERSION").write_text(version + "\n")
     (destination / "SHA256SUMS").write_text("".join(
@@ -105,13 +95,13 @@ def main():
         for file in sorted(destination.rglob("*")) if file.is_file() and file.name != "SHA256SUMS"))
     if args.archive:
         args.archive.mkdir(parents=True, exist_ok=True)
-        name = f"servicewrapper{'-onedev' if args.profile == 'onedev' else ''}-{version}"
+        name = f"servicewrapper-{version}"
         archive = args.archive / (name + ".tar.gz")
         with tarfile.open(archive, "w:gz") as output:
             output.add(destination, arcname=name)
         archive.with_suffix(archive.suffix + ".sha256").write_text(
             f"{hashlib.sha256(archive.read_bytes()).hexdigest()}  {archive.name}\n")
-    print(f"Packaged ServiceWrapper {version} ({args.profile}) for all five targets in {destination}")
+    print(f"Packaged ServiceWrapper {version} for all five targets in {destination}")
 
 
 if __name__ == "__main__":
