@@ -11,8 +11,9 @@ It works with any Java application exposing a main method.
 
 ## Use with a Java application
 
-Extract `servicewrapper-VERSION.tar.gz`, put your application jars in `lib`, and
-edit `conf/wrapper.conf`:
+Download `servicewrapper-VERSION.tar.gz` from the
+[public download site](https://code.onedev.io/onedev/servicewrapper/~sites/public/),
+extract it, put your application jars in `lib`, and edit `conf/wrapper.conf`:
 
 ```properties
 wrapper.name=my-app
@@ -173,12 +174,13 @@ binaries, verifies their architecture, collects dependency license texts in
 Use `--destination` to choose another output directory. `--archive` additionally
 writes a versioned archive and SHA-256 file to the supplied directory.
 Vendored license texts include pinned provenance in `licenses/sources.json`.
-Build caches and binaries are ignored; release artifacts are published by CI.
+Build caches and binaries are ignored; release downloads are published by CI.
 
 The OneDev **Release** job checks formatting, runs Rust tests and clippy, builds all
 five targets, runs JVM integration and service-account tests on its Linux host,
-and publishes the archive and its checksum through a `PublishArtifactStep`. It
-uses `1dev/buildenv` and runs manually with `tod build run Release --branch main`. The buildenv project
+and publishes the archive and its checksum to the public download site through a
+`PublishSiteStep`. The site lists the files from the latest successful publication.
+It uses `1dev/buildenv` and runs manually with `tod build run Release --branch main`. The buildenv project
 must first publish the image containing Rust 1.96.1, Zig, cargo-zigbuild,
 cargo-xwin, LLVM, and the macOS SDK. Windows SDK/CRT downloads require network
 access during the first cross-build. No CI step installs tools into a later step's

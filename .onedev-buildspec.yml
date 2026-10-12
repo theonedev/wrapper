@@ -22,10 +22,10 @@ jobs:
     useTTY: false
     condition: SUCCESSFUL
     optional: false
-  - type: PublishArtifactStep
-    name: publish artifacts
+  - type: PublishSiteStep
+    name: publish public site
     sourcePath: dist/artifacts
-    artifacts: '*.tar.gz *.sha256'
+    siteFiles: '*.tar.gz *.sha256'
     condition: SUCCESSFUL
     optional: false
   retryCondition: never
