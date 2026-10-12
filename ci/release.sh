@@ -3,7 +3,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 rustc --version
 zig version
-cargo zigbuild --version
+# The version flag belongs to the executable, not its zigbuild subcommand.
+cargo-zigbuild --version
 cargo xwin --version
 command -v clang-cl
 command -v lld-link
