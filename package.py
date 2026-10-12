@@ -1,0 +1,118 @@
+#!/usr/bin/env python3
+"""Assemble a generic Java service distribution or OneDev packaging inputs."""
+import argparse
+import hashlib
+import json
+from pathlib import Path
+import shutil
+import struct
+import subprocess
+import tarfile
+import tomllib
+import zipfile
+
+ROOT = Path(__file__).resolve().parent
+TARGETS = {
+    "wrapper-linux-x86-64": ("elf", 62),
+    "wrapper-linux-arm-64": ("elf", 183),
+    "wrapper-macosx-arm-64": ("macho", 0x100000C),
+    "wrapper-windows-x86-64.exe": ("pe", 0x8664),
+    "wrapper-windows-arm-64.exe": ("pe", 0xAA64),
+}
+
+
+def verify(path, kind, machine):
+    data = path.read_bytes()
+    if kind == "elf":
+        assert data[:6] == b"\x7fELF\x02\x01" and struct.unpack_from("<H", data, 18)[0] == machine, path
+    elif kind == "macho":
+        assert data[:4] == b"\xcf\xfa\xed\xfe" and struct.unpack_from("<I", data, 4)[0] == machine, path
+    else:
+        offset = struct.unpack_from("<I", data, 0x3C)[0]
+        assert data[offset:offset + 4] == b"PE\x00\x00" and struct.unpack_from("<H", data, offset + 4)[0] == machine, path
+
+
+def notices():
+    packages = {}
+    for target in ("aarch64-apple-darwin", "x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl", "x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"):
+        metadata = json.loads(subprocess.check_output(["cargo", "metadata", "--locked", "--offline", "--format-version", "1", "--filter-platform", target], cwd=ROOT))
+        packages.update({p["id"]: p for p in metadata["packages"]})
+    parts = [(ROOT / "LICENSE").read_text()]
+    for package in sorted(packages.values(), key=lambda p: (p["name"], p["version"])):
+        if package["name"] == "servicewrapper":
+            continue
+        directory = Path(package["manifest_path"]).parent
+        texts = []
+        for pattern in ("LICENSE*", "LICENCE*", "COPYING*", "license*", "licence*"):
+            for file in sorted(directory.glob(pattern)):
+                if file.is_file():
+                    content = file.read_text(errors="replace")
+                    if content not in texts:
+                        texts.append(content)
+        if not texts:
+            vendored = ROOT / "licenses" / f"{package['name']}-{package['version']}.txt"
+            if not vendored.is_file():
+                raise RuntimeError(f"Missing license text for {package['name']}; vendor its upstream license in {vendored}")
+            texts.append(vendored.read_text())
+        parts.append(f"\n{'=' * 72}\n{package['name']} {package['version']} ({package['license']})\n" + "\n".join(texts))
+    return "\n".join(parts)
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--profile", choices=("generic", "onedev"), default="generic")
+    parser.add_argument("--destination", type=Path)
+    parser.add_argument("--archive", type=Path, help="Also write a versioned tar.gz and its SHA-256 here")
+    args = parser.parse_args()
+    source = ROOT / "dist/boot"
+    for name, (kind, machine) in TARGETS.items():
+        verify(source / name, kind, machine)
+    with zipfile.ZipFile(source / "wrapper.jar") as jar:
+        assert "org/tanukisoftware/wrapper/WrapperManager.class" in jar.namelist()
+    license_text = notices()
+    destination = (args.destination or ROOT / "dist/release" / args.profile).resolve()
+    boot = destination / "boot"
+    boot.mkdir(parents=True, exist_ok=True)
+    for name in [*TARGETS, "wrapper.jar"]:
+        shutil.copy2(source / name, boot / name)
+        (boot / name).chmod(0o644 if name.endswith(".jar") else 0o755)
+    # The jar travels with server and agent downloads; keep all license notices there.
+    with zipfile.ZipFile(boot / "wrapper.jar", "a", compression=zipfile.ZIP_DEFLATED) as jar:
+        info = zipfile.ZipInfo("META-INF/THIRD-PARTY-LICENSES.txt", date_time=(2026, 1, 1, 0, 0, 0))
+        info.compress_type = zipfile.ZIP_DEFLATED
+        jar.writestr(info, license_text)
+    if args.profile == "onedev":
+        shutil.copy2(boot / "wrapper-macosx-arm-64", boot / "wrapper-macosx-universal-64")
+        for name in ("App.sh.in", "AppCommand.bat.in"):
+            shutil.copy2(ROOT / "resources" / name, destination / name)
+        for source_name, name in (("App.sh.in", "Command.sh.in"), ("AppCommand.bat.in", "Command.bat.in")):
+            (destination / name).write_text((ROOT / "resources" / source_name).read_text().replace(" --script ", " --command "))
+        shutil.copy2(ROOT / "integrations/onedev/wrapper.conf", destination / "wrapper.conf")
+        shutil.copy2(ROOT / "integrations/onedev/README.md", destination / "README.md")
+    else:
+        for name in ("bin", "conf", "lib", "logs"):
+            (destination / name).mkdir(exist_ok=True)
+        shutil.copy2(ROOT / "resources/App.sh.in", destination / "bin/service.sh")
+        (destination / "bin/service.sh").chmod(0o755)
+        shutil.copy2(ROOT / "resources/AppCommand.bat.in", destination / "bin/service.bat")
+        shutil.copy2(ROOT / "resources/wrapper.conf", destination / "conf/wrapper.conf")
+        for name in ("LICENSE", "README.md"):
+            shutil.copy2(ROOT / name, destination / name)
+    version = tomllib.loads((ROOT / "Cargo.toml").read_text())["package"]["version"]
+    (destination / "VERSION").write_text(version + "\n")
+    (destination / "SHA256SUMS").write_text("".join(
+        f"{hashlib.sha256(file.read_bytes()).hexdigest()}  {file.relative_to(destination).as_posix()}\n"
+        for file in sorted(destination.rglob("*")) if file.is_file() and file.name != "SHA256SUMS"))
+    if args.archive:
+        args.archive.mkdir(parents=True, exist_ok=True)
+        name = f"servicewrapper{'-onedev' if args.profile == 'onedev' else ''}-{version}"
+        archive = args.archive / (name + ".tar.gz")
+        with tarfile.open(archive, "w:gz") as output:
+            output.add(destination, arcname=name)
+        archive.with_suffix(archive.suffix + ".sha256").write_text(
+            f"{hashlib.sha256(archive.read_bytes()).hexdigest()}  {archive.name}\n")
+    print(f"Packaged ServiceWrapper {version} ({args.profile}) for all five targets in {destination}")
+
+
+if __name__ == "__main__":
+    main()

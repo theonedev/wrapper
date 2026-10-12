@@ -1,0 +1,575 @@
+use crate::{Options, config::Config, java, logging::Log};
+use anyhow::{Context, Result, bail, ensure};
+use fs2::FileExt;
+use std::{
+    fs::{self, File, OpenOptions},
+    io::{Read, Write},
+    net::{TcpListener, TcpStream},
+    path::PathBuf,
+    process::{Child, Command},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread,
+    time::{Duration, Instant},
+};
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum State {
+    Starting,
+    Running,
+    Stopping,
+}
+pub static STOP: AtomicBool = AtomicBool::new(false);
+
+fn secure_file(path: &PathBuf) -> Result<File> {
+    let mut options = OpenOptions::new();
+    options.create(true).read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    let file = options
+        .open(path)
+        .with_context(|| format!("Opening {}", path.display()))?;
+    ensure!(
+        file.metadata()?.is_file(),
+        "Expected regular file: {}",
+        path.display()
+    );
+    Ok(file)
+}
+
+struct Instance {
+    lock: File,
+    control: PathBuf,
+}
+impl Instance {
+    fn acquire(config: &Config, port: u16, token: &str) -> Result<Self> {
+        let path = config.pid_file();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let mut lock = secure_file(&path)?;
+        lock.try_lock_exclusive()
+            .context("This service instance is already running")?;
+        lock.set_len(0)?;
+        writeln!(lock, "{}", std::process::id())?;
+        let instance = Self {
+            lock,
+            control: config.control_file(),
+        };
+        let mut file = secure_file(&instance.control)?;
+        #[cfg(windows)]
+        crate::service::protect_control_file(&instance.control)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        }
+        file.set_len(0)?;
+        write!(file, "{port}\n{token}\n")?;
+        file.sync_all()?;
+        Ok(instance)
+    }
+}
+impl Drop for Instance {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.control);
+        // Keep the inode: unlinking a locked file permits two independent locks on one pathname.
+        let _ = self.lock.set_len(0);
+    }
+}
+
+pub fn request(config: &Config, command: &str) -> Result<Option<String>> {
+    let lock = match OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(config.pid_file())
+    {
+        Ok(lock) => lock,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error).context("Run this command as the service account or administrator");
+        }
+    };
+    for attempt in 0..20 {
+        match lock.try_lock_exclusive() {
+            Ok(()) => return Ok(None),
+            Err(error) if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() => (),
+            Err(error) => return Err(error.into()),
+        }
+        match exchange_control(config, command) {
+            Ok(response) => return Ok(Some(response)),
+            Err(error) => {
+                let retry = error.downcast_ref::<std::io::Error>().is_none_or(|error| {
+                    matches!(
+                        error.kind(),
+                        std::io::ErrorKind::NotFound
+                            | std::io::ErrorKind::ConnectionRefused
+                            | std::io::ErrorKind::ConnectionReset
+                            | std::io::ErrorKind::UnexpectedEof
+                            | std::io::ErrorKind::BrokenPipe
+                    )
+                });
+                if !retry || attempt == 19 {
+                    return Err(error);
+                }
+                // Startup publishes the control file after locking. Shutdown closes the
+                // listener just before releasing the lock. Recheck rather than reporting
+                // either short transition as a failed start/stop operation.
+                thread::sleep(Duration::from_millis(50));
+            }
+        }
+    }
+    unreachable!()
+}
+
+fn exchange_control(config: &Config, command: &str) -> Result<String> {
+    let control = fs::read_to_string(config.control_file()).context("Service is starting, or control file is not readable; retry as the service account or administrator")?;
+    let mut lines = control.lines();
+    let port: u16 = lines.next().context("Missing control port")?.parse()?;
+    let token = lines.next().context("Missing control token")?;
+    let mut stream =
+        TcpStream::connect_timeout(&([127, 0, 0, 1], port).into(), Duration::from_secs(2))?;
+    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+    writeln!(stream, "{token} {command}")?;
+    read_line(&mut stream)
+}
+
+fn read_line(stream: &mut TcpStream) -> Result<String> {
+    let mut bytes = Vec::new();
+    let mut byte = [0];
+    while bytes.len() < 512 {
+        stream.read_exact(&mut byte)?;
+        if byte[0] == b'\n' {
+            return Ok(String::from_utf8(bytes)?);
+        }
+        bytes.push(byte[0]);
+    }
+    bail!("Control message too long")
+}
+
+struct Pending {
+    stream: TcpStream,
+    bytes: Vec<u8>,
+    accepted: Instant,
+}
+
+// A JVM can connect before its writer classes finish initializing. Read handshakes
+// incrementally, so a slow JVM or unauthenticated client never stalls supervision.
+fn next_message(
+    listener: &TcpListener,
+    pending: &mut Vec<Pending>,
+) -> Result<Option<(TcpStream, String)>> {
+    while pending.len() < 32 {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                stream.set_nonblocking(true)?;
+                pending.push(Pending {
+                    stream,
+                    bytes: Vec::new(),
+                    accepted: Instant::now(),
+                });
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let mut index = 0;
+    while index < pending.len() {
+        let connection = &mut pending[index];
+        let mut buffer = [0; 512];
+        let remove = match connection.stream.read(&mut buffer) {
+            Ok(0) => true,
+            Ok(length) => {
+                connection.bytes.extend_from_slice(&buffer[..length]);
+                if let Some(end) = connection.bytes.iter().position(|b| *b == b'\n')
+                    && end < 512
+                {
+                    let connection = pending.swap_remove(index);
+                    if let Ok(message) = String::from_utf8(connection.bytes[..end].to_vec()) {
+                        connection.stream.set_nonblocking(false)?;
+                        connection
+                            .stream
+                            .set_write_timeout(Some(Duration::from_secs(2)))?;
+                        return Ok(Some((connection.stream, message)));
+                    }
+                    continue;
+                }
+                connection.bytes.len() >= 512
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                ) =>
+            {
+                false
+            }
+            Err(_) => true,
+        };
+        if remove || connection.accepted.elapsed() >= Duration::from_secs(10) {
+            pending.swap_remove(index);
+        } else {
+            index += 1;
+        }
+    }
+    Ok(None)
+}
+
+#[cfg(unix)]
+pub fn start(options: &Options, config: &Config) -> Result<i32> {
+    if request(config, "status")?.is_some() {
+        println!("{} is already running", config.name());
+        return Ok(0);
+    }
+    let mut command = Command::new(std::env::current_exe()?);
+    command
+        .args(options.child_args("daemon"))
+        .stdin(std::process::Stdio::null());
+    // Preserve startup diagnostics even if Java cannot be launched.
+    let diagnostic = config
+        .path("wrapper.logfile", "../logs/console.log")
+        .with_file_name("wrapper-start.log");
+    if let Some(parent) = diagnostic.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let output = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(diagnostic)?;
+    command.stdout(output.try_clone()?).stderr(output);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    let mut child = command.spawn()?;
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(config.number("wrapper.startup.wait.timeout", 120)?)
+    {
+        if let Some(status) = child.try_wait()? {
+            bail!(
+                "{} failed to start ({status}); see logs/wrapper-start.log and logs/console.log",
+                config.name()
+            );
+        }
+        if let Ok(Some(state)) = request(config, "status")
+            && state == "RUNNING"
+        {
+            println!("{} started", config.name());
+            return Ok(0);
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    let _ = request(config, "stop");
+    bail!("Startup timed out; stop requested. See logs/console.log")
+}
+
+pub fn stop(config: &Config) -> Result<i32> {
+    if request(config, "stop")?.is_none() {
+        println!("{} is not running", config.name());
+        return Ok(0);
+    }
+    // Zero has the JSW meaning: allow shutdown hooks to complete without a time limit.
+    while request(config, "status")?.is_some() {
+        thread::sleep(Duration::from_millis(100));
+    }
+    println!("{} stopped", config.name());
+    Ok(0)
+}
+
+struct Jvm {
+    child: Child,
+    cleaned: bool,
+    #[cfg(windows)]
+    job: crate::service::Job,
+}
+impl Jvm {
+    fn spawn(command: &mut Command) -> Result<Self> {
+        let mut child = command.spawn().context("Starting JVM")?;
+        #[cfg(windows)]
+        {
+            let job = match crate::service::Job::attach(&child) {
+                Ok(job) => job,
+                Err(error) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(error);
+                }
+            };
+            Ok(Self {
+                child,
+                job,
+                cleaned: false,
+            })
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = &mut child;
+            Ok(Self {
+                child,
+                cleaned: false,
+            })
+        }
+    }
+    fn kill(&mut self) {
+        if self.cleaned {
+            return;
+        }
+        self.cleaned = true;
+        #[cfg(unix)]
+        unsafe {
+            libc::kill(-(self.child.id() as i32), libc::SIGKILL);
+        }
+        #[cfg(windows)]
+        self.job.terminate();
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+impl Drop for Jvm {
+    fn drop(&mut self) {
+        self.kill();
+    }
+}
+
+pub fn run(options: &Options, mut state_changed: impl FnMut(State) -> Result<()>) -> Result<i32> {
+    #[cfg(unix)]
+    crate::service::switch_user(&options.load()?)?;
+    // Reload after an account switch to apply set.* overrides to the account's environment.
+    let initial = options.load()?;
+    let listener = TcpListener::bind(("127.0.0.1", 0))?;
+    listener.set_nonblocking(true)?;
+    let mut pending = Vec::new();
+    let mut random = [0u8; 32];
+    getrandom::fill(&mut random)
+        .map_err(|e| anyhow::anyhow!("Random number generation failed: {e}"))?;
+    let token: String = random.iter().map(|b| format!("{b:02x}")).collect();
+    let port = listener.local_addr()?.port();
+    let _instance = Instance::acquire(&initial, port, &token)?;
+    let signaled = Arc::new(AtomicBool::new(false));
+    let handler = signaled.clone();
+    // SCM services have no console. Their control handler sets STOP directly.
+    if options.command != "service" {
+        ctrlc::set_handler(move || {
+            handler.store(true, Ordering::SeqCst);
+        })?;
+    }
+    let mut failures = 0;
+    loop {
+        if signaled.load(Ordering::SeqCst) || STOP.load(Ordering::SeqCst) {
+            return Ok(0);
+        }
+        let config = if initial.boolean("wrapper.restart.reload_configuration", true) {
+            options.load()?
+        } else {
+            initial.clone()
+        };
+        ensure!(
+            config.pid_file() == initial.pid_file(),
+            "Changing wrapper.name or wrapper.pidfile requires stopping the wrapper"
+        );
+        let log = Log::new(&config, options.command != "daemon")?;
+        state_changed(State::Starting)?;
+        let mut jvm = Jvm::spawn(&mut java::command(
+            &config,
+            &options.arguments,
+            port,
+            &token,
+        )?)?;
+        let stdout = log.pipe(jvm.child.stdout.take().unwrap());
+        let stderr = log.pipe(jvm.child.stderr.take().unwrap());
+        let started = Instant::now();
+        let mut ready = false;
+        let mut bridge: Option<TcpStream> = None;
+        let mut restart = false;
+        let mut requested_exit = None;
+        let mut stopping: Option<Instant> = None;
+        let mut stop_reported = false;
+        let mut forced = false;
+        let exit;
+        loop {
+            if let Some(status) = jvm.child.try_wait()? {
+                exit = status.code().unwrap_or(1);
+                break;
+            }
+            if signaled.load(Ordering::SeqCst) || STOP.load(Ordering::SeqCst) {
+                requested_exit = Some(0);
+                restart = false;
+            }
+            if requested_exit.is_some() && !stop_reported {
+                state_changed(State::Stopping)?;
+                stop_reported = true;
+            }
+            if (requested_exit.is_some() || restart) && stopping.is_none() {
+                stopping = Some(Instant::now());
+                if let Some(stream) = &mut bridge {
+                    let _ = stream.write_all(b"STOP\n");
+                }
+                #[cfg(unix)]
+                if bridge.is_none() {
+                    unsafe {
+                        libc::kill(jvm.child.id() as i32, libc::SIGTERM);
+                    }
+                }
+            }
+            if let Some(stopping) = stopping {
+                let timeout = config.number("wrapper.shutdown.timeout", 30)?;
+                if timeout > 0 && stopping.elapsed() >= Duration::from_secs(timeout) {
+                    log.message("Shutdown timeout expired; terminating JVM and its children");
+                    jvm.kill();
+                    forced = true;
+                }
+            } else {
+                let timeout = config.number("wrapper.startup.timeout", 30)?;
+                if !ready && timeout > 0 && started.elapsed() >= Duration::from_secs(timeout) {
+                    log.message("JVM bridge startup timed out");
+                    jvm.kill();
+                    forced = true;
+                }
+            }
+            if let Some((mut stream, message)) = next_message(&listener, &mut pending)?
+                && let Some(command) = message.strip_prefix(&format!("{token} "))
+            {
+                match command {
+                    "JVM" if bridge.is_none() => {
+                        stream.write_all(b"OK\n")?;
+                        // The bridge sends requests on separate connections. This channel is
+                        // retained for graceful stop and parent-death detection.
+                        if stopping.is_some() {
+                            let _ = stream.write_all(b"STOP\n");
+                        }
+                        bridge = Some(stream);
+                        ready = true;
+                        if stopping.is_none() {
+                            state_changed(State::Running)?;
+                        }
+                    }
+                    "status" => {
+                        let _ = writeln!(
+                            stream,
+                            "{}",
+                            if stopping.is_some() {
+                                "STOPPING"
+                            } else if ready {
+                                "RUNNING"
+                            } else {
+                                "STARTING"
+                            }
+                        );
+                    }
+                    "stop" => {
+                        requested_exit = Some(0);
+                        restart = false;
+                        let _ = stream.write_all(b"OK\n");
+                    }
+                    "restart" => {
+                        if requested_exit.is_none() {
+                            restart = true;
+                        }
+                        let _ = stream.write_all(b"OK\n");
+                    }
+                    "dump" => {
+                        #[cfg(unix)]
+                        unsafe {
+                            libc::kill(jvm.child.id() as i32, libc::SIGQUIT);
+                        }
+                        let _ = stream.write_all(b"OK\n");
+                    }
+                    command if command.starts_with("EXIT ") => {
+                        if let Ok(code) = command[5..].parse::<i32>() {
+                            // An operator's stop wins a race with an application restart.
+                            if requested_exit.is_none() && !restart {
+                                requested_exit = Some(code);
+                            }
+                            let _ = stream.write_all(b"OK\n");
+                        }
+                    }
+                    _ => {
+                        let _ = stream.write_all(b"ERROR\n");
+                    }
+                }
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+        drop(bridge);
+        jvm.kill(); // Close inherited output pipes held by remaining JVM descendants.
+        let _ = stdout.join();
+        let _ = stderr.join();
+        let stopped = signaled.load(Ordering::SeqCst) || STOP.load(Ordering::SeqCst);
+        if stopped || requested_exit.is_some() {
+            log.close();
+            return Ok(if forced {
+                1
+            } else {
+                requested_exit.unwrap_or(0)
+            });
+        }
+        let action = config.get(
+            &format!("wrapper.on_exit.{exit}"),
+            config.get(
+                "wrapper.on_exit.default",
+                if exit == 0 { "SHUTDOWN" } else { "RESTART" },
+            ),
+        );
+        // Older OneDev Docker entrypoints pass maintenance commands directly.
+        let legacy_maintenance = !options.arguments.is_empty()
+            && config
+                .numbered("wrapper.app.parameter.")
+                .first()
+                .is_some_and(|main| main == "io.onedev.commons.bootstrap.Bootstrap");
+        if !restart
+            && (action.eq_ignore_ascii_case("SHUTDOWN")
+                || config.boolean("wrapper.restart.disabled", false)
+                || legacy_maintenance)
+        {
+            log.close();
+            return Ok(exit);
+        }
+        if !restart {
+            if started.elapsed()
+                >= Duration::from_secs(config.number("wrapper.successful_invocation_time", 300)?)
+            {
+                failures = 0;
+            }
+            failures += 1;
+            if failures >= config.number("wrapper.max_failed_invocations", 5)? {
+                log.message("JVM failed repeatedly; giving up");
+                log.close();
+                return Ok(if exit == 0 { 1 } else { exit });
+            }
+        } else {
+            failures = 0;
+        }
+        log.message("Restarting JVM (configuration will be reloaded)");
+        log.close();
+        let delay = Instant::now();
+        while delay.elapsed() < Duration::from_secs(config.number("wrapper.restart.delay", 5)?) {
+            if signaled.load(Ordering::SeqCst) || STOP.load(Ordering::SeqCst) {
+                return Ok(0);
+            }
+            // Continue serving management commands during the restart delay.
+            if let Some((mut stream, message)) = next_message(&listener, &mut pending)? {
+                if message == format!("{token} stop") {
+                    let _ = stream.write_all(b"OK\n");
+                    return Ok(0);
+                }
+                if message == format!("{token} status") {
+                    let _ = stream.write_all(b"STARTING\n");
+                }
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+    }
+}

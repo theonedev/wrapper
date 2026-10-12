@@ -1,0 +1,36 @@
+version: 56
+jobs:
+- name: Release
+  steps:
+  - type: CheckoutStep
+    name: checkout
+    cloneCredential:
+      type: DefaultCredential
+    withLfs: false
+    withSubmodules: false
+    condition: SUCCESSFUL
+    optional: false
+  - type: CommandStep
+    name: build and test all platforms
+    runInContainer: true
+    image: 1dev/buildenv
+    interpreter:
+      type: PosixInterpreter
+      shell: bash
+      commands: ./ci/release.sh
+    runAs: 0:0
+    useTTY: false
+    condition: SUCCESSFUL
+    optional: false
+  - type: PublishArtifactStep
+    name: publish artifacts
+    sourcePath: dist/artifacts
+    artifacts: '*.tar.gz *.sha256'
+    condition: SUCCESSFUL
+    optional: false
+  retryCondition: never
+  maxAttempts: 1
+  retryDelay: 30
+  includeUpstreamWhenRebuild: false
+  includeDownstreamWhenRebuild: false
+  timeout: 3600
