@@ -284,7 +284,7 @@ fn install(options: &Options, config: &Config) -> Result<i32> {
         error_control: ServiceErrorControl::Normal,
         executable_path: std::env::current_exe()?,
         launch_arguments: options
-            .child_args("-s")
+            .service_args("-s")
             .into_iter()
             .map(OsString::from)
             .collect(),
@@ -369,15 +369,12 @@ pub fn manage(options: &Options, config: &Config) -> Result<i32> {
             Ok(0)
         }
         "start" => {
+            let timeout = config.number("wrapper.startup.wait.timeout", 120)?;
             let service = open(config, ServiceAccess::START | ServiceAccess::QUERY_STATUS)?;
             if service.query_status()?.current_state == ServiceState::Stopped {
                 service.start::<&str>(&[])?;
             }
-            wait(
-                &service,
-                ServiceState::Running,
-                config.number("wrapper.startup.wait.timeout", 120)?,
-            )?;
+            wait(&service, ServiceState::Running, timeout)?;
             Ok(0)
         }
         "stop" => stop(config),
@@ -400,6 +397,9 @@ pub fn manage(options: &Options, config: &Config) -> Result<i32> {
                 let state = service.query_status()?.current_state;
                 println!("{}: {state:?}", config.name());
                 Ok(if state == ServiceState::Stopped { 3 } else { 0 })
+            } else if let Some(state) = supervisor::request(config, "status")? {
+                println!("{}: {state}", config.name());
+                Ok(0)
             } else {
                 println!("{}: not installed", config.name());
                 Ok(3)
@@ -408,6 +408,6 @@ pub fn manage(options: &Options, config: &Config) -> Result<i32> {
         command => bail!("Unsupported Windows command: {command}"),
     }
 }
-pub fn render(_: &Config) -> Result<String> {
+pub fn render(_: &Options, _: &Config) -> Result<String> {
     bail!("Windows services are registered with SCM; use install")
 }

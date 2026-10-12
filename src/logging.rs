@@ -14,6 +14,7 @@ pub struct Log {
 }
 impl Log {
     pub fn new(config: &Config, console: bool) -> Result<Self> {
+        let redirect = !console;
         let mut file = None;
         let path = config.path("wrapper.logfile", "../logs/console.log");
         if !config
@@ -23,13 +24,12 @@ impl Log {
             if let Some(parent) = path.parent() {
                 fs::create_dir_all(parent)?;
             }
-            file = Some(
-                OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&path)
-                    .with_context(|| format!("Opening {}", path.display()))?,
-            );
+            file = Some(open_file(&path, redirect)?);
+        }
+        #[cfg(unix)]
+        if redirect && file.is_none() {
+            // A reload can disable logging after diagnostics were redirected to a file.
+            redirect_output(&OpenOptions::new().write(true).open("/dev/null")?)?;
         }
         let console = console
             && !config
@@ -55,7 +55,7 @@ impl Log {
                             // Close before rename, including on Windows.
                             file.take();
                             rotate(&path, count)?;
-                            file = Some(OpenOptions::new().create(true).append(true).open(&path)?);
+                            file = Some(open_file(&path, redirect)?);
                             length = 0;
                         }
                         let output: &mut File = file.as_mut().unwrap();
@@ -98,6 +98,32 @@ impl Log {
         drop(self.sender);
         let _ = self.worker.join();
     }
+}
+fn open_file(path: &PathBuf, redirect: bool) -> Result<File> {
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .with_context(|| format!("Opening {}", path.display()))?;
+    #[cfg(unix)]
+    if redirect {
+        // Detached diagnostics must follow rotation and configuration reloads,
+        // rather than continue writing to an old (eventually unlinked) inode.
+        redirect_output(&file)?;
+    }
+    #[cfg(not(unix))]
+    let _ = redirect;
+    Ok(file)
+}
+#[cfg(unix)]
+fn redirect_output(file: &File) -> Result<()> {
+    use std::os::fd::AsRawFd;
+    for target in [libc::STDOUT_FILENO, libc::STDERR_FILENO] {
+        if unsafe { libc::dup2(file.as_raw_fd(), target) } < 0 {
+            return Err(std::io::Error::last_os_error()).context("Redirecting daemon output");
+        }
+    }
+    Ok(())
 }
 fn size(value: &str) -> Result<u64> {
     let value = value.to_ascii_lowercase();

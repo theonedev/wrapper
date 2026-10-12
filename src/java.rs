@@ -1,31 +1,80 @@
-use crate::config::{Config, unquote};
+use crate::{
+    child::ManagedChild,
+    config::{Config, unquote},
+};
 use anyhow::{Context, Result, ensure};
 use std::{
     fs,
+    io::Read,
     path::Path,
     process::{Command, Stdio},
+    thread,
+    time::{Duration, Instant},
 };
 
-pub fn command(config: &Config, arguments: &[String], port: u16, token: &str) -> Result<Command> {
+pub fn command(
+    config: &Config,
+    arguments: &[String],
+    port: u16,
+    token: &str,
+    mut cancelled: impl FnMut() -> Result<bool>,
+) -> Result<Option<Command>> {
     let executable = unquote(config.get("wrapper.java.command", "java"));
     let mut probe = Command::new(&executable);
     probe
         .current_dir(config.working_dir())
         .envs(&config.environment)
-        .arg("-version");
+        .arg("-version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     hide_console(&mut probe);
-    let version = probe.output().with_context(|| {
+    let timeout = config.number("wrapper.startup.timeout", 30)?;
+    let mut probe = ManagedChild::spawn(&mut probe).with_context(|| {
         format!("Launching {executable}; set wrapper.java.command to a Java 17+ executable")
     })?;
+    let stdout = read_output(probe.child.stdout.take().unwrap());
+    let stderr = read_output(probe.child.stderr.take().unwrap());
+    let started = Instant::now();
+    let status = (|| -> Result<_> {
+        let mut status = None;
+        loop {
+            if cancelled()? {
+                return Ok(None);
+            }
+            if status.is_none() {
+                status = probe.child.try_wait()?;
+                if status.is_some() {
+                    probe.kill();
+                }
+            }
+            if status.is_some() && stdout.is_finished() && stderr.is_finished() {
+                return Ok(status);
+            }
+            ensure!(
+                timeout == 0 || started.elapsed() < Duration::from_secs(timeout),
+                "Java version check timed out"
+            );
+            thread::sleep(Duration::from_millis(25));
+        }
+    })();
+    probe.kill();
+    // An escaped helper may keep the pipes open. Join only after they drain;
+    // timeout/cancellation must still let the wrapper exit.
+    let Some(status) = status? else {
+        return Ok(None);
+    };
+    let stdout = stdout.join().unwrap()?;
+    let stderr = stderr.join().unwrap()?;
     ensure!(
-        version.status.success(),
+        status.success(),
         "Java version check failed: {}",
-        String::from_utf8_lossy(&version.stderr)
+        String::from_utf8_lossy(&stderr)
     );
     let version_text = format!(
         "{}{}",
-        String::from_utf8_lossy(&version.stdout),
-        String::from_utf8_lossy(&version.stderr)
+        String::from_utf8_lossy(&stdout),
+        String::from_utf8_lossy(&stderr)
     );
     let major = java_major(&version_text).context("Unable to read Java version")?;
     ensure!(
@@ -86,7 +135,11 @@ pub fn command(config: &Config, arguments: &[String], port: u16, token: &str) ->
     cmd.arg("-cp").arg(std::env::join_paths(classpath)?);
     // Launch any Java main class through the lifecycle bridge; no JSW JNI dependency.
     cmd.env("SERVICEWRAPPER_PORT", port.to_string())
-        .env("SERVICEWRAPPER_TOKEN", token);
+        .env("SERVICEWRAPPER_TOKEN", token)
+        .env(
+            "SERVICEWRAPPER_SHUTDOWN_TIMEOUT",
+            config.number("wrapper.shutdown.timeout", 30)?.to_string(),
+        );
     cmd.arg("org.servicewrapper.WrapperSimpleApp");
     let main = config.get(
         "wrapper.java.mainclass",
@@ -103,12 +156,17 @@ pub fn command(config: &Config, arguments: &[String], port: u16, token: &str) ->
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        cmd.process_group(0);
-    }
-    Ok(cmd)
+    Ok(Some(cmd))
+}
+
+fn read_output(
+    mut input: impl Read + Send + 'static,
+) -> thread::JoinHandle<std::io::Result<Vec<u8>>> {
+    thread::spawn(move || {
+        let mut bytes = Vec::new();
+        input.read_to_end(&mut bytes)?;
+        Ok(bytes)
+    })
 }
 
 fn hide_console(command: &mut Command) {

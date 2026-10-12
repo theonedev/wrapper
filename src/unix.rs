@@ -57,24 +57,83 @@ fn is_loaded(config: &Config) -> bool {
         .is_ok_and(|o| o.status.success())
 }
 
+fn launchd_pid(config: &Config) -> Result<Option<u32>> {
+    let output = Command::new("launchctl")
+        .args(["print", &format!("system/{}", label(config))])
+        .output()
+        .context("Querying launchd service")?;
+    // launchctl returns 113 when the service is not loaded.
+    if output.status.code() == Some(113) {
+        return Ok(None);
+    }
+    ensure!(
+        output.status.success(),
+        "Querying launchd service: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    String::from_utf8(output.stdout)?
+        .lines()
+        .find_map(|line| line.strip_prefix("\tpid = "))
+        .map(|pid| pid.parse().context("Reading launchd service PID"))
+        .transpose()
+}
+
+fn stop_launchd(config: &Config) -> Result<()> {
+    if let Some(pid) = launchd_pid(config)? {
+        checked(Command::new("launchctl").args([
+            "kill",
+            "SIGTERM",
+            &format!("system/{}", label(config)),
+        ]))?;
+        // The wrapper applies its own shutdown timeout, including unlimited waits.
+        // Use launchd's PID because installed overrides may change the PID-file path.
+        while launchd_pid(config)? == Some(pid) {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+    Ok(())
+}
+
 fn write_new(path: &PathBuf, contents: &str, mode: u32) -> Result<()> {
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(mode)
         .open(path)?;
-    file.write_all(contents.as_bytes())?;
-    file.sync_all()?;
+    if let Err(error) = file
+        .write_all(contents.as_bytes())
+        .and_then(|_| file.sync_all())
+    {
+        fs::remove_file(path).with_context(|| {
+            format!(
+                "Removing incomplete {} after write failed: {error}",
+                path.display()
+            )
+        })?;
+        return Err(error.into());
+    }
     Ok(())
 }
 
-pub fn render(config: &Config) -> Result<String> {
-    let script = script(config)?;
+fn launch_args(options: &Options, config: &Config, command: &str) -> Result<Vec<String>> {
+    let mut args = vec![
+        script(config)?.to_string_lossy().into_owned(),
+        "--service".into(),
+    ];
+    args.extend(options.service_args(command));
+    Ok(args)
+}
+
+pub fn render(options: &Options, config: &Config) -> Result<String> {
+    let config = &runtime_config(options, config)?;
+    let args = launch_args(options, config, "console")?;
     if cfg!(target_os = "macos") {
         let mut result = format!(
-            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\n<key>Label</key><string>{}</string>\n<key>ProgramArguments</key><array><string>{}</string><string>console</string></array>\n<key>RunAtLoad</key><true/>\n<key>KeepAlive</key><false/>\n<key>ExitTimeOut</key><integer>{}</integer>\n",
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\n<key>Label</key><string>{}</string>\n<key>ProgramArguments</key><array>{}</array>\n<key>RunAtLoad</key><true/>\n<key>KeepAlive</key><false/>\n<key>ExitTimeOut</key><integer>{}</integer>\n",
             xml(&label(config)),
-            xml(&script.to_string_lossy()),
+            args.iter()
+                .map(|arg| format!("<string>{}</string>", xml(arg)))
+                .collect::<String>(),
             config.number("wrapper.shutdown.timeout", 30)?
         );
         if !config.user().is_empty() {
@@ -94,9 +153,12 @@ pub fn render(config: &Config) -> Result<String> {
             (timeout + 10).to_string()
         };
         let mut result = format!(
-            "[Unit]\nDescription={}\nAfter=network.target\n\n[Service]\nType=simple\nExecStart={} console\nKillMode=mixed\nTimeoutStopSec={}\nRestart=no\n",
+            "[Unit]\nDescription={}\nAfter=network.target\n\n[Service]\nType=simple\nExecStart={}\nKillMode=mixed\nTimeoutStopSec={}\nRestart=no\n",
             unit_value(config.get("wrapper.description", config.name()))?,
-            unit_arg(&script.to_string_lossy())?,
+            args.iter()
+                .map(|arg| unit_arg(arg))
+                .collect::<Result<Vec<_>>>()?
+                .join(" "),
             timeout
         );
         if !config.user().is_empty() {
@@ -131,7 +193,7 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
-fn install(config: &Config) -> Result<i32> {
+fn install(options: &Options, config: &Config) -> Result<i32> {
     ensure!(
         unsafe { libc::geteuid() } == 0,
         "Run install/remove as root (sudo)"
@@ -141,37 +203,97 @@ fn install(config: &Config) -> Result<i32> {
         println!("{} is already installed", config.name());
         return Ok(0);
     }
-    if cfg!(target_os = "macos") || PathBuf::from("/run/systemd/system").is_dir() {
-        write_new(&path, &render(config)?, 0o644)?;
-        if !cfg!(target_os = "macos") {
+    let (path, registration) = if cfg!(target_os = "macos")
+        || PathBuf::from("/run/systemd/system").is_dir()
+    {
+        write_new(&path, &render(options, config)?, 0o644)?;
+        let registration = (|| {
+            if cfg!(target_os = "macos") {
+                return Ok(());
+            }
             checked(Command::new("systemctl").arg("daemon-reload"))?;
             checked(
                 Command::new("systemctl").args(["enable", &format!("{}.service", config.name())]),
-            )?;
+            )
+        })();
+        if registration.is_err() {
+            // enable may have created some links before failing.
+            let _ = checked(
+                Command::new("systemctl").args(["disable", &format!("{}.service", config.name())]),
+            );
         }
+        (path, registration)
     } else {
         // SysV installations and old JSW init links use the same detached supervisor.
+        let args = launch_args(options, config, "start")?;
         let contents = format!(
-            "#!/bin/bash\n### BEGIN INIT INFO\n# Provides: {}\n# Required-Start: $remote_fs $network\n# Required-Stop: $remote_fs $network\n# Default-Start: 2 3 4 5\n# Default-Stop: 0 1 6\n# Short-Description: Java service\n### END INIT INFO\nexec {} \"$1\" sysd\n",
+            "#!/bin/bash\n### BEGIN INIT INFO\n# Provides: {}\n# Required-Start: $remote_fs $network\n# Required-Stop: $remote_fs $network\n# Default-Start: 2 3 4 5\n# Default-Stop: 0 1 6\n# Short-Description: Java service\n### END INIT INFO\nexec {} --service \"$1\" {}\n",
             config.name(),
-            shell_quote(&script(config)?.to_string_lossy())
+            shell_quote(&args[0]),
+            args[3..]
+                .iter()
+                .map(|arg| shell_quote(arg))
+                .collect::<Vec<_>>()
+                .join(" ")
         );
-        write_new(&init_script(config), &contents, 0o755)?;
-        if Command::new("update-rc.d").arg("--help").output().is_ok() {
-            checked(Command::new("update-rc.d").args([config.name(), "defaults"]))?;
+        let path = init_script(config);
+        write_new(&path, &contents, 0o755)?;
+        let registration = if Command::new("update-rc.d").arg("--help").output().is_ok() {
+            let registration =
+                checked(Command::new("update-rc.d").args([config.name(), "defaults"]));
+            if registration.is_err() {
+                let _ = checked(Command::new("update-rc.d").args(["-f", config.name(), "remove"]));
+            }
+            registration
         } else {
-            checked(Command::new("chkconfig").args(["--add", config.name()]))?;
+            let registration = checked(Command::new("chkconfig").args(["--add", config.name()]));
+            if registration.is_err() {
+                let _ = checked(Command::new("chkconfig").args(["--del", config.name()]));
+            }
+            registration
+        };
+        (path, registration)
+    };
+    if let Err(error) = registration {
+        fs::remove_file(&path).with_context(|| {
+            format!(
+                "Removing {} after installation failed: {error:#}",
+                path.display()
+            )
+        })?;
+        if path == definition(config) && !cfg!(target_os = "macos") {
+            let _ = checked(Command::new("systemctl").arg("daemon-reload"));
         }
+        return Err(error);
     }
     println!("{} installed", config.name());
     Ok(0)
 }
 
 fn native(options: &Options, config: &Config) -> Result<Option<i32>> {
-    if options.internal || !definition(config).exists() {
+    if options.internal {
         return Ok(None);
     }
     let command = options.command.as_str();
+    if !definition(config).exists() {
+        let script = init_script(config);
+        if !cfg!(target_os = "macos")
+            && script.exists()
+            && matches!(
+                command,
+                "start" | "stop" | "restart" | "condrestart" | "status" | "dump"
+            )
+        {
+            // Use saved installation arguments. The legacy marker prevents an
+            // init symlink to service.sh from routing straight back here.
+            let status = Command::new(script)
+                .args([command, "sysd"])
+                .status()
+                .context("Executing SysV service script")?;
+            return Ok(Some(status.code().unwrap_or(1)));
+        }
+        return Ok(None);
+    }
     if cfg!(target_os = "macos") {
         let target = format!("system/{}", label(config));
         match command {
@@ -190,13 +312,16 @@ fn native(options: &Options, config: &Config) -> Result<Option<i32>> {
             "stop" => {
                 // Wait for Java shutdown before unloading, especially for old JSW plists with
                 // launchd's default short ExitTimeOut.
-                supervisor::stop(config)?;
+                stop_launchd(config)?;
                 if is_loaded(config) {
                     checked(Command::new("launchctl").args(["bootout", &target]))?;
                 }
             }
-            "restart" => {
-                supervisor::stop(config)?;
+            "restart" | "condrestart" => {
+                if command == "condrestart" && launchd_pid(config)?.is_none() {
+                    return Ok(Some(0));
+                }
+                stop_launchd(config)?;
                 if is_loaded(config) {
                     checked(Command::new("launchctl").args(["kickstart", &target]))?;
                 } else {
@@ -208,6 +333,15 @@ fn native(options: &Options, config: &Config) -> Result<Option<i32>> {
                     )?;
                 }
             }
+            "status" => {
+                let running = launchd_pid(config)?.is_some();
+                println!(
+                    "{}: {}",
+                    config.name(),
+                    if running { "RUNNING" } else { "STOPPED" }
+                );
+                return Ok(Some(if running { 0 } else { 3 }));
+            }
             _ => return Ok(None),
         }
     } else {
@@ -215,6 +349,35 @@ fn native(options: &Options, config: &Config) -> Result<Option<i32>> {
             "start" | "stop" | "restart" => checked(
                 Command::new("systemctl").args([command, &format!("{}.service", config.name())]),
             )?,
+            "condrestart" => checked(
+                Command::new("systemctl")
+                    .args(["try-restart", &format!("{}.service", config.name())]),
+            )?,
+            "status" => {
+                let output = Command::new("systemctl")
+                    .args([
+                        "show",
+                        "--property=ActiveState",
+                        "--value",
+                        &format!("{}.service", config.name()),
+                    ])
+                    .output()
+                    .context("Querying systemd service")?;
+                ensure!(
+                    output.status.success(),
+                    "Querying systemd service: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                );
+                let output = String::from_utf8(output.stdout)?;
+                let state = output.trim();
+                ensure!(!state.is_empty(), "Missing systemd service state");
+                println!("{}: {}", config.name(), state.to_ascii_uppercase());
+                return Ok(Some(if matches!(state, "inactive" | "failed") {
+                    3
+                } else {
+                    0
+                }));
+            }
             _ => return Ok(None),
         }
     }
@@ -222,13 +385,16 @@ fn native(options: &Options, config: &Config) -> Result<Option<i32>> {
 }
 
 pub fn manage(options: &Options, config: &Config) -> Result<i32> {
+    // Resolve paths as the daemon would, while retaining root's permissions for
+    // native service management and removal of installed service definitions.
+    let config = &runtime_config(options, config)?;
     if let Some(code) = native(options, config)? {
         return Ok(code);
     }
     match options.command.as_str() {
-        "install" => install(config),
+        "install" => install(options, config),
         "installstart" => {
-            install(config)?;
+            install(options, config)?;
             let mut start = options.clone();
             start.command = "start".into();
             manage(&start, config)
@@ -240,7 +406,12 @@ pub fn manage(options: &Options, config: &Config) -> Result<i32> {
             );
             let mut stop = options.clone();
             stop.command = "stop".into();
-            manage(&stop, config)?;
+            let code = manage(&stop, config)?;
+            ensure!(
+                code == 0,
+                "{} could not be stopped (exit code {code}); service registration was retained",
+                config.name()
+            );
             if definition(config).exists() {
                 if !cfg!(target_os = "macos") {
                     checked(
@@ -304,33 +475,65 @@ pub fn dispatch(_: &Options, _: &Config) -> Result<i32> {
     bail!("The service command is Windows-only; use console under systemd or launchd")
 }
 
-pub fn switch_user(config: &Config) -> Result<()> {
+struct Account {
+    user: String,
+    name: CString,
+    uid: libc::uid_t,
+    gid: libc::gid_t,
+    home: String,
+}
+
+fn account(config: &Config) -> Result<Option<Account>> {
     let user = config.user();
     if user.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
     let name = CString::new(user.as_str())?;
     unsafe {
         let pwd = libc::getpwnam(name.as_ptr());
         ensure!(!pwd.is_null(), "Unknown service user");
-        let (uid, gid) = ((*pwd).pw_uid, (*pwd).pw_gid);
-        let home = CStr::from_ptr((*pwd).pw_dir).to_string_lossy().into_owned();
-        if libc::geteuid() == uid {
-            return Ok(());
-        }
+        Ok(Some(Account {
+            user,
+            name,
+            uid: (*pwd).pw_uid,
+            gid: (*pwd).pw_gid,
+            home: CStr::from_ptr((*pwd).pw_dir).to_string_lossy().into_owned(),
+        }))
+    }
+}
+
+fn runtime_config(options: &Options, config: &Config) -> Result<Config> {
+    let mut environment = std::env::vars().collect::<std::collections::HashMap<_, _>>();
+    if let Some(account) = account(config)? {
+        environment.insert("HOME".into(), account.home);
+        environment.insert("USER".into(), account.user.clone());
+        environment.insert("LOGNAME".into(), account.user);
+    }
+    options.load_with_environment(environment)
+}
+
+pub fn switch_user(config: &Config) -> Result<()> {
+    let Some(account) = account(config)? else {
+        return Ok(());
+    };
+    unsafe {
+        let switching = libc::geteuid() != account.uid;
         ensure!(
-            libc::geteuid() == 0,
+            !switching || libc::geteuid() == 0,
             "Run as the configured service user or root"
         );
         // This runs before the supervisor starts any threads. Match runuser/su's
         // account environment so application tools do not use root's home directory.
-        std::env::set_var("HOME", home);
-        std::env::set_var("USER", &user);
-        std::env::set_var("LOGNAME", &user);
+        std::env::set_var("HOME", account.home);
+        std::env::set_var("USER", &account.user);
+        std::env::set_var("LOGNAME", &account.user);
+        if !switching {
+            return Ok(());
+        }
         ensure!(
-            libc::initgroups(name.as_ptr(), gid as _) == 0
-                && libc::setgid(gid) == 0
-                && libc::setuid(uid) == 0,
+            libc::initgroups(account.name.as_ptr(), account.gid as _) == 0
+                && libc::setgid(account.gid) == 0
+                && libc::setuid(account.uid) == 0,
             "Unable to switch to service user: {}",
             std::io::Error::last_os_error()
         );

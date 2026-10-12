@@ -66,12 +66,21 @@ bin/service.sh restart
 bin/service.sh stop
 bin/service.sh remove
 bin/service.sh console
+bin/service.sh dump
 ```
 
+`console` runs the application in the foreground with its output in the terminal;
+press Ctrl+C to stop it. On Unix, run `dump` from another terminal to request a
+thread dump from the running JVM. The dump appears in the application's console
+output and `logs/console.log` with the default logging configuration. Windows
+supports `console`, but not `dump`.
+For a systemd or launchd service installed with a `wrapper.pidfile` override,
+pass the same override to the wrapper binary's `dump` command. Dump requests
+locate the control file directly instead of querying the service manager.
+
 `installstart` installs and starts. `condrestart` restarts only a running instance.
-Unix additionally supports `dump` to request a JVM thread dump. Application
-arguments preserve boundaries, spaces, and exit codes. Additional arguments do not
-disable service crash recovery. To create a one-shot command
+Application arguments preserve boundaries, spaces, and exit codes. Additional
+arguments do not disable service crash recovery. To create a one-shot command
 launcher, change its `--script` argument to `--command`: its filename is prepended
 to the application's arguments and crash retries are disabled. Direct invocation
 also accepts `wrapper.restart.disabled=TRUE` before `--` for one-shot invocations.
@@ -81,6 +90,18 @@ running), and macOS launchd. Installation/removal require administrator/root acc
 ordinary console and detached Unix operation do not. Unix `start` without service
 registration starts a detached supervisor. Windows `start` requires installation.
 Status returns 0 for an active instance and 3 when stopped/not installed.
+New service registrations preserve the selected configuration file, runtime
+property overrides, and application arguments. Account/password overrides used
+to register a Windows service are excluded from its persisted command line.
+Remove and reinstall existing services to update their saved launch arguments.
+On SysV, management commands use the installed init script and its saved arguments.
+Installed systemd and launchd services use the service manager for status and
+conditional restart, including when installation overrides the PID-file location.
+On Unix, stop and remove a service before deleting its service account. Management
+commands need that account to resolve account-dependent configuration paths.
+Changing the Unix service account requires stopping and starting the wrapper;
+JVM-only restarts reject account changes. Reinstall native services to update
+their registered account.
 
 Existing systemd units invoking `service.sh start sysd` and launchd plists invoking
 `service.sh launchdinternal` remain supported. macOS retains the existing
@@ -89,6 +110,8 @@ entry point and amd64 executable filename remain unchanged. Configuration filena
 boot-relative paths, `.shconf`, `RUN_AS_USER`, and `FILES_TO_SOURCE` remain supported.
 
 Stop a deployment before replacing its wrapper files.
+Control files append `.control` to the complete PID filename (for example,
+`service.pid.control`), so distinct PID filenames keep separate control endpoints.
 
 ## Configuration compatibility
 
@@ -104,6 +127,11 @@ settings include:
 - `%ENVIRONMENT_VARIABLE%`, `set.NAME`, `set.default.NAME`, optional `#include`,
   and `#include.required`. Include paths are relative to `boot`. Recursive includes
   are rejected. `##` represents a literal hash in property values; a single hash begins a comment.
+  Environment assignments can extend existing values (for example,
+  `set.PATH=../tools:%PATH%` on Unix); existing references are captured when assigned,
+  and references defined later are resolved after reading the configuration.
+  Environment names are case-insensitive on Windows and case-sensitive on Unix.
+  Expanded values are limited to 1 MiB to bound malformed or cyclic references.
 - `wrapper.name`, `wrapper.displayname`, `wrapper.description`, and Unix
   `wrapper.daemon.user` (or `RUN_AS_USER` in the launcher/`.shconf`). Unix service
   names use letters, digits, dots, underscores, and hyphens. `wrapper.script` supplies
@@ -119,6 +147,8 @@ settings include:
   `wrapper.console.loglevel=NONE` and `wrapper.logfile.loglevel=NONE` disable their
   destinations. Other levels preserve the application's unmodified stdout/stderr;
   application filtering remains in your application's logging configuration.
+  Disabling file logging also disables detached startup logging; use `console`
+  to see startup diagnostics.
 - `wrapper.startup.timeout`, `wrapper.shutdown.timeout` (0 means unlimited),
   `wrapper.restart.delay`, `wrapper.max_failed_invocations`,
   `wrapper.successful_invocation_time`, `wrapper.restart.reload_configuration`,
@@ -126,11 +156,11 @@ settings include:
   Normal exit defaults to shutdown; a crash defaults to restart. Explicit Java API
   stop/restart requests take precedence. `wrapper.restart.disabled=TRUE` disables retries for one-shot commands.
 - `wrapper.pidfile` and `wrapper.startup.wait.timeout` (default 120 seconds for
-  detached startup). The PID file is retained empty after shutdown so its OS lock
-  cannot be bypassed by racing unlink/recreation.
+  detached startup; 0 waits without a time limit). The PID file is retained empty
+  after shutdown so its OS lock cannot be bypassed by racing unlink/recreation.
 
 The wrapper implements the Java main-class service lifecycle, not the entire JSW product.
-JSW license, JNI, localization, console formatting/title, syslog, CPU/ping monitor,
+JSW JNI, localization, console formatting/title, syslog, CPU/ping monitor,
 auto-bitness, sequence-gap, and console-input settings are inert compatibility
 entries. In particular, no JVM responsiveness/ping watchdog is implemented.
 Network-share mappings, output filters,
@@ -144,9 +174,20 @@ The supervisor launches Java directly, without evaluating JVM options in a shell
 Control uses an authenticated loopback connection. The token file is owner-only on
 Unix and restricted to its owner, Administrators, and LocalSystem on Windows.
 Stopping invokes Java shutdown hooks; configured timeouts force termination when
-necessary. Unix process groups and Windows job objects clean up JVM descendants.
-The Java bridge also initiates shutdown when its supervisor connection is lost.
+necessary, including when the application calls `System.exit()` or its last
+non-daemon thread returns. Unix process groups and Windows job objects clean up
+JVM descendants.
+The Java bridge also initiates shutdown when its supervisor connection is lost,
+and forcibly exits if hooks exceed `wrapper.shutdown.timeout`. For this parent-loss
+case only, an unlimited timeout (`0`) uses a 30-second fallback.
 Crash retries are bounded, and control remains available during restart delays.
+The Java version probe also observes `wrapper.startup.timeout` and remains
+cancellable through stop commands and termination signals.
+Custom Unix Java launchers and application helpers must stay in the inherited
+process group. Helpers that create a separate session or process group can escape
+cleanup. Keeping the application JVM's inherited stdout/stderr pipes open can
+also delay supervisor shutdown beyond the configured timeout. The Java version
+probe remains cancellable and bounded by its configured timeout even in this case.
 
 ## Build and package
 

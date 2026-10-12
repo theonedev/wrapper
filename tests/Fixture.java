@@ -10,10 +10,15 @@ public class Fixture {
         long pid = ProcessHandle.current().pid();
         Files.writeString(root.resolve("events"), "start " + pid + " " + value + "\n",
                 StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+        Thread main = Thread.currentThread();
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             try {
-                if ("hang".equals(System.getProperty("fixture.mode")))
+                Thread.sleep(Long.getLong("fixture.shutdown.delay", 0));
+                if ("hang".equals(System.getProperty("fixture.mode"))
+                        || "throw-hang".equals(System.getProperty("fixture.mode")))
                     Thread.sleep(60000);
+                if ("throw".equals(System.getProperty("fixture.mode")))
+                    main.join();
                 Files.writeString(root.resolve("events"), "stop " + pid + "\n", StandardOpenOption.APPEND);
             } catch (Exception e) {
                 throw new RuntimeException(e);
@@ -30,6 +35,12 @@ public class Fixture {
             System.exit(7);
         if (mode.equals("crash"))
             Runtime.getRuntime().halt(9);
+        if (mode.equals("throw") || mode.equals("throw-hang"))
+            throw new IllegalStateException("Fixture main failed");
+        if (mode.equals("stop")) {
+            WrapperManager.stopAndReturn(1);
+            return;
+        }
         if (mode.equals("logs")) {
             for (int i = 0; i < 2000; i++) {
                 System.out.println("x".repeat(256));

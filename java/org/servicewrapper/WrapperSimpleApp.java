@@ -19,7 +19,7 @@ public final class WrapperSimpleApp {
             if (e instanceof InvocationTargetException && e.getCause() != null)
                 e = e.getCause();
             e.printStackTrace();
-            WrapperManager.stopAndReturn(1);
+            WrapperManager.failAndReturn();
         }
     }
 }

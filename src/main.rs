@@ -1,3 +1,4 @@
+mod child;
 mod config;
 mod java;
 mod logging;
@@ -6,7 +7,13 @@ mod supervisor;
 
 use anyhow::{Context, Result, bail, ensure};
 use config::Config;
-use std::{env, path::PathBuf, process};
+use std::{collections::HashMap, env, path::PathBuf, process};
+
+const SERVICE_COMMANDS: &str = if cfg!(unix) {
+    "console|start|stop|restart|status|install|remove|dump"
+} else {
+    "console|start|stop|restart|status|install|remove"
+};
 
 #[derive(Clone, Debug)]
 pub struct Options {
@@ -21,7 +28,7 @@ impl Options {
     fn parse(mut args: Vec<String>) -> Result<Self> {
         ensure!(
             !args.is_empty(),
-            "Usage: wrapper [console|start|stop|restart|status|install|remove] conf/wrapper.conf [property=value ...] [-- application arguments]"
+            "Usage: wrapper [{SERVICE_COMMANDS}] conf/wrapper.conf [property=value ...] [-- application arguments]"
         );
         let mut options = Self {
             command: "console".into(),
@@ -37,10 +44,14 @@ impl Options {
             args.remove(0);
             options.config = args.remove(0).into();
             if !one_shot {
-                ensure!(
-                    !args.is_empty(),
-                    "Usage: {script} console|start|stop|restart|status|install|remove"
-                );
+                // Installed Unix services retain the launcher's .shconf setup,
+                // but supply their own config, overrides and application args.
+                if args.first().is_some_and(|arg| arg == "--service") {
+                    let mut service = Self::parse(args[1..].to_vec())?;
+                    service.internal = true;
+                    return Ok(service);
+                }
+                ensure!(!args.is_empty(), "Usage: {script} {SERVICE_COMMANDS}");
                 options.command = args.remove(0);
                 if args.first().is_some_and(|s| s == "sysd") {
                     args.remove(0);
@@ -109,13 +120,29 @@ impl Options {
     }
 
     pub fn load(&self) -> Result<Config> {
+        self.load_with_environment(env::vars().collect())
+    }
+    pub fn load_with_environment(&self, environment: HashMap<String, String>) -> Result<Config> {
         Config::load(
             &self.config,
             env::current_exe()?
                 .parent()
                 .context("Executable directory missing")?,
             &self.overrides,
+            environment,
         )
+    }
+    pub fn service_args(&self, command: &str) -> Vec<String> {
+        let mut options = self.clone();
+        options.overrides.retain(|property| {
+            !property.split_once('=').is_some_and(|(key, _)| {
+                matches!(
+                    key.trim(),
+                    "wrapper.ntservice.account" | "wrapper.ntservice.password"
+                )
+            })
+        });
+        options.child_args(command)
     }
     pub fn child_args(&self, command: &str) -> Vec<String> {
         let mut args = vec![
@@ -141,12 +168,12 @@ fn run() -> Result<i32> {
         "console" | "daemon" => supervisor::run(&options, |_| Ok(())),
         "service" => service::dispatch(&options, &config),
         "check" => {
-            java::command(&config, &options.arguments, 0, "")?;
+            java::command(&config, &options.arguments, 0, "", || Ok(false))?;
             println!("Configuration and Java executable OK");
             Ok(0)
         }
         "render-service" => {
-            print!("{}", service::render(&config)?);
+            print!("{}", service::render(&options, &config)?);
             Ok(0)
         }
         "start" | "stop" | "restart" | "status" | "install" | "remove" | "installstart"
@@ -164,4 +191,44 @@ fn main() {
         }
     };
     process::exit(code);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn persisted_service_arguments_exclude_credentials() {
+        let options = Options {
+            command: "install".into(),
+            config: "custom.conf".into(),
+            overrides: vec![
+                "wrapper.ntservice.account=service-user".into(),
+                "wrapper.ntservice.password=first-secret".into(),
+                " wrapper.ntservice.password = second-secret".into(),
+                "wrapper.java.additional.1=-Xmx1g".into(),
+            ],
+            arguments: vec![
+                "two words".into(),
+                "wrapper.ntservice.password=application-data".into(),
+            ],
+            internal: false,
+        };
+        assert_eq!(
+            options.service_args("-s"),
+            vec![
+                "-s",
+                "custom.conf",
+                "wrapper.java.additional.1=-Xmx1g",
+                "--",
+                "two words",
+                "wrapper.ntservice.password=application-data",
+            ]
+        );
+        assert!(
+            options
+                .child_args("daemon")
+                .contains(&"wrapper.ntservice.password=first-secret".into())
+        );
+    }
 }

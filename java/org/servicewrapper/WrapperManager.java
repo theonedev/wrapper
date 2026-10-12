@@ -8,6 +8,7 @@ import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /** Optional lifecycle API for applications launched by ServiceWrapper. */
@@ -43,22 +44,57 @@ public final class WrapperManager {
         if (!"OK".equals(reader.readLine()))
             throw new IllegalStateException("ServiceWrapper rejected JVM connection");
         socket.setSoTimeout(0);
+        // System.exit and the last non-daemon thread returning also run hooks.
+        // Notify without requesting an exit code or changing the restart policy.
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            try (Socket notification = connect()) {
+                send(notification, "SHUTDOWN");
+                reader(notification).readLine();
+            } catch (Exception ignored) {
+                // The supervisor may already be gone; do not prevent JVM exit.
+            }
+        }, "ServiceWrapper shutdown notification"));
         Thread control = new Thread(() -> {
             try (socket) {
                 String command;
                 while ((command = reader.readLine()) != null) {
                     if (command.equals("STOP")) {
                         stopAndReturn(0);
-                        return;
                     }
                 }
             } catch (Exception e) {
                 // Losing the supervisor must never leave an orphan JVM running.
             }
-            stopAndReturn(1);
+            supervisorLost();
         }, "ServiceWrapper control");
         control.setDaemon(true);
         control.start();
+    }
+
+    private static void supervisorLost() {
+        long timeout = 30;
+        try {
+            long configured = Long.parseLong(System.getenv("SERVICEWRAPPER_SHUTDOWN_TIMEOUT"));
+            if (configured > 0)
+                timeout = configured;
+        } catch (RuntimeException ignored) {
+        }
+        // Unlimited operator-initiated shutdown remains supported. Once the
+        // supervisor is gone, use a finite fallback so hooks cannot orphan us.
+        final long deadline = timeout;
+        Thread watchdog = new Thread(() -> {
+            try {
+                TimeUnit.SECONDS.sleep(deadline);
+            } catch (InterruptedException ignored) {
+            } finally {
+                Runtime.getRuntime().halt(1);
+            }
+        }, "ServiceWrapper parent-loss watchdog");
+        watchdog.setDaemon(true);
+        watchdog.start();
+        // Keep watching even when an earlier stop is already running hooks.
+        if (stopping.compareAndSet(false, true))
+            System.exit(1);
     }
 
     public static void restartAndReturn() {
@@ -67,6 +103,10 @@ public final class WrapperManager {
 
     public static void stopAndReturn(int exitCode) {
         exit("EXIT " + exitCode, exitCode);
+    }
+
+    static void failAndReturn() {
+        exit("FAIL", 1);
     }
 
     private static void exit(String command, int exitCode) {

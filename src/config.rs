@@ -1,7 +1,8 @@
 use anyhow::{Context, Result, bail, ensure};
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, HashMap},
-    env, fs,
+    fs,
     path::{Path, PathBuf},
 };
 
@@ -14,12 +15,20 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn load(file: &Path, boot: &Path, overrides: &[String]) -> Result<Self> {
+    pub fn load(
+        file: &Path,
+        boot: &Path,
+        overrides: &[String],
+        environment: HashMap<String, String>,
+    ) -> Result<Self> {
         let mut config = Self {
             file: fs::canonicalize(file).with_context(|| format!("Reading {}", file.display()))?,
             boot: boot.to_path_buf(),
             values: BTreeMap::new(),
-            environment: env::vars().collect(),
+            environment: environment
+                .into_iter()
+                .map(|(name, value)| (environment_key(&name).into_owned(), value))
+                .collect(),
         };
         config.read(&config.file.clone(), &mut Vec::new())?;
         for property in overrides {
@@ -117,11 +126,17 @@ impl Config {
         let (key, value) = line.split_once('=').context("Expected property=value")?;
         let (key, value) = (key.trim(), value.trim());
         if let Some(name) = key.strip_prefix("set.default.") {
-            self.environment
-                .entry(name.into())
-                .or_insert_with(|| value.into());
+            let name = environment_key(name);
+            if !self.environment.contains_key(name.as_ref()) {
+                let value = expand(value, &self.environment)?;
+                self.environment.insert(name.into_owned(), value);
+            }
         } else if let Some(name) = key.strip_prefix("set.") {
-            self.environment.insert(name.into(), value.into());
+            // Capture existing values before overwriting them, e.g. set.PATH=...:%PATH%.
+            // References that are not defined yet are resolved after reading the file.
+            let value = expand(value, &self.environment)?;
+            self.environment
+                .insert(environment_key(name).into_owned(), value);
         } else {
             self.values.insert(key.into(), value.into());
         }
@@ -177,7 +192,9 @@ impl Config {
         self.path("wrapper.pidfile", &format!("../bin/{}.pid", self.name()))
     }
     pub fn control_file(&self) -> PathBuf {
-        self.pid_file().with_extension("control")
+        let mut path = self.pid_file().into_os_string();
+        path.push(".control");
+        path.into()
     }
     pub fn user(&self) -> String {
         self.get(
@@ -189,6 +206,14 @@ impl Config {
         )
         .to_owned()
     }
+}
+
+fn environment_key(name: &str) -> Cow<'_, str> {
+    // Keep one entry per Windows variable, including inherited names such as Path.
+    #[cfg(windows)]
+    return Cow::Owned(name.to_uppercase());
+    #[cfg(not(windows))]
+    Cow::Borrowed(name)
 }
 
 fn strip_comment(line: &str) -> String {
@@ -222,16 +247,28 @@ pub fn unquote(value: &str) -> String {
 }
 
 fn expand(source: &str, environment: &HashMap<String, String>) -> Result<String> {
+    // A duplicating cycle can exhaust memory long before the iteration limit.
+    const MAX_EXPANSION: usize = 1024 * 1024;
     let mut value = source.to_owned();
     for _ in 0..32 {
+        ensure!(
+            value.len() <= MAX_EXPANSION,
+            "Environment expansion exceeds 1 MiB (possible cycle)"
+        );
         let mut output = String::new();
         let mut rest = value.as_str();
+        let mut expanded = false;
         while let Some(start) = rest.find('%') {
             output.push_str(&rest[..start]);
             let tail = &rest[start + 1..];
             if let Some(end) = tail.find('%') {
                 let name = &tail[..end];
-                if let Some(replacement) = environment.get(name) {
+                if let Some(replacement) = environment.get(environment_key(name).as_ref()) {
+                    ensure!(
+                        output.len().saturating_add(replacement.len()) <= MAX_EXPANSION,
+                        "Environment expansion exceeds 1 MiB (possible cycle)"
+                    );
+                    expanded = true;
                     output.push_str(replacement);
                 } else {
                     output.push_str(&rest[start..start + end + 2]);
@@ -244,6 +281,7 @@ fn expand(source: &str, environment: &HashMap<String, String>) -> Result<String>
         }
         output.push_str(rest);
         if output == value {
+            ensure!(!expanded, "Cyclic environment expansion in configuration");
             return Ok(value);
         }
         value = output;
@@ -257,11 +295,11 @@ mod tests {
     #[test]
     fn expansion_and_quoting_preserve_jvm_arguments() {
         let env = HashMap::from([
-            ("memory".into(), "50".into()),
-            ("alias".into(), "%memory%".into()),
+            ("MEMORY".into(), "50".into()),
+            ("ALIAS".into(), "%MEMORY%".into()),
         ]);
         assert_eq!(
-            expand("-XX:MaxRAMPercentage=%alias%", &env).unwrap(),
+            expand("-XX:MaxRAMPercentage=%ALIAS%", &env).unwrap(),
             "-XX:MaxRAMPercentage=50"
         );
         assert_eq!(
@@ -274,8 +312,8 @@ mod tests {
     fn cycles_fail() {
         assert!(
             expand(
-                "%a%",
-                &HashMap::from([("a".into(), "%b%".into()), ("b".into(), "%a%".into())])
+                "%A%",
+                &HashMap::from([("A".into(), "%B%".into()), ("B".into(), "%A%".into())])
             )
             .is_err()
         );

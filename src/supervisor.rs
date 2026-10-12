@@ -1,4 +1,4 @@
-use crate::{Options, config::Config, java, logging::Log};
+use crate::{Options, child::ManagedChild, config::Config, java, logging::Log};
 use anyhow::{Context, Result, bail, ensure};
 use fs2::FileExt;
 use std::{
@@ -6,7 +6,6 @@ use std::{
     io::{Read, Write},
     net::{TcpListener, TcpStream},
     path::PathBuf,
-    process::{Child, Command},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -222,26 +221,45 @@ fn next_message(
 
 #[cfg(unix)]
 pub fn start(options: &Options, config: &Config) -> Result<i32> {
-    if request(config, "status")?.is_some() {
+    use std::process::Command;
+
+    // Open startup diagnostics as the service account: an inherited writable
+    // descriptor retains its access even after the daemon drops privileges.
+    crate::service::switch_user(config)?;
+    // Match the daemon's paths and set.* overrides after the account switch.
+    let config = options.load()?;
+    if request(&config, "status")?.is_some() {
         println!("{} is already running", config.name());
         return Ok(0);
     }
+    // Validate before spawning: an invalid wait must not leave a daemon behind.
+    let timeout = config.number("wrapper.startup.wait.timeout", 120)?;
     let mut command = Command::new(std::env::current_exe()?);
     command
         .args(options.child_args("daemon"))
         .stdin(std::process::Stdio::null());
-    // Preserve startup diagnostics even if Java cannot be launched.
-    let diagnostic = config
-        .path("wrapper.logfile", "../logs/console.log")
-        .with_file_name("wrapper-start.log");
-    if let Some(parent) = diagnostic.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let output = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(diagnostic)?;
-    command.stdout(output.try_clone()?).stderr(output);
+    let diagnostics = if config
+        .get("wrapper.logfile.loglevel", "INFO")
+        .eq_ignore_ascii_case("NONE")
+    {
+        command
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        "run console for startup diagnostics".to_owned()
+    } else {
+        // Preserve startup diagnostics even if Java cannot be launched.
+        let diagnostic = config.path("wrapper.logfile", "../logs/console.log");
+        if let Some(parent) = diagnostic.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let output = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&diagnostic)
+            .with_context(|| format!("Opening {}", diagnostic.display()))?;
+        command.stdout(output.try_clone()?).stderr(output);
+        format!("see {}", diagnostic.display())
+    };
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -256,15 +274,14 @@ pub fn start(options: &Options, config: &Config) -> Result<i32> {
     }
     let mut child = command.spawn()?;
     let start = Instant::now();
-    while start.elapsed() < Duration::from_secs(config.number("wrapper.startup.wait.timeout", 120)?)
-    {
+    while timeout == 0 || start.elapsed() < Duration::from_secs(timeout) {
         if let Some(status) = child.try_wait()? {
             bail!(
-                "{} failed to start ({status}); see logs/wrapper-start.log and logs/console.log",
+                "{} failed to start ({status}); {diagnostics}",
                 config.name()
             );
         }
-        if let Ok(Some(state)) = request(config, "status")
+        if let Ok(Some(state)) = request(&config, "status")
             && state == "RUNNING"
         {
             println!("{} started", config.name());
@@ -272,8 +289,8 @@ pub fn start(options: &Options, config: &Config) -> Result<i32> {
         }
         thread::sleep(Duration::from_millis(100));
     }
-    let _ = request(config, "stop");
-    bail!("Startup timed out; stop requested. See logs/console.log")
+    let _ = request(&config, "stop");
+    bail!("Startup timed out; stop requested; {diagnostics}")
 }
 
 pub fn stop(config: &Config) -> Result<i32> {
@@ -287,61 +304,6 @@ pub fn stop(config: &Config) -> Result<i32> {
     }
     println!("{} stopped", config.name());
     Ok(0)
-}
-
-struct Jvm {
-    child: Child,
-    cleaned: bool,
-    #[cfg(windows)]
-    job: crate::service::Job,
-}
-impl Jvm {
-    fn spawn(command: &mut Command) -> Result<Self> {
-        let mut child = command.spawn().context("Starting JVM")?;
-        #[cfg(windows)]
-        {
-            let job = match crate::service::Job::attach(&child) {
-                Ok(job) => job,
-                Err(error) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(error);
-                }
-            };
-            Ok(Self {
-                child,
-                job,
-                cleaned: false,
-            })
-        }
-        #[cfg(not(windows))]
-        {
-            let _ = &mut child;
-            Ok(Self {
-                child,
-                cleaned: false,
-            })
-        }
-    }
-    fn kill(&mut self) {
-        if self.cleaned {
-            return;
-        }
-        self.cleaned = true;
-        #[cfg(unix)]
-        unsafe {
-            libc::kill(-(self.child.id() as i32), libc::SIGKILL);
-        }
-        #[cfg(windows)]
-        self.job.terminate();
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-impl Drop for Jvm {
-    fn drop(&mut self) {
-        self.kill();
-    }
 }
 
 pub fn run(options: &Options, mut state_changed: impl FnMut(State) -> Result<()>) -> Result<i32> {
@@ -380,14 +342,34 @@ pub fn run(options: &Options, mut state_changed: impl FnMut(State) -> Result<()>
             config.pid_file() == initial.pid_file(),
             "Changing wrapper.name or wrapper.pidfile requires stopping the wrapper"
         );
+        #[cfg(unix)]
+        ensure!(
+            config.user() == initial.user(),
+            "Changing wrapper.daemon.user or RUN_AS_USER requires stopping the wrapper"
+        );
         let log = Log::new(&config, options.command != "daemon")?;
         state_changed(State::Starting)?;
-        let mut jvm = Jvm::spawn(&mut java::command(
-            &config,
-            &options.arguments,
-            port,
-            &token,
-        )?)?;
+        let command = java::command(&config, &options.arguments, port, &token, || {
+            if signaled.load(Ordering::SeqCst) || STOP.load(Ordering::SeqCst) {
+                return Ok(true);
+            }
+            if let Some((mut stream, message)) = next_message(&listener, &mut pending)? {
+                if message == format!("{token} stop") {
+                    let _ = stream.write_all(b"OK\n");
+                    return Ok(true);
+                }
+                if message == format!("{token} status") {
+                    let _ = stream.write_all(b"STARTING\n");
+                }
+            }
+            Ok(false)
+        })?;
+        let Some(mut command) = command else {
+            state_changed(State::Stopping)?;
+            log.close();
+            return Ok(0);
+        };
+        let mut jvm = ManagedChild::spawn(&mut command)?;
         let stdout = log.pipe(jvm.child.stdout.take().unwrap());
         let stderr = log.pipe(jvm.child.stderr.take().unwrap());
         let started = Instant::now();
@@ -478,6 +460,12 @@ pub fn run(options: &Options, mut state_changed: impl FnMut(State) -> Result<()>
                         if requested_exit.is_none() {
                             restart = true;
                         }
+                        let _ = stream.write_all(b"OK\n");
+                    }
+                    "FAIL" | "SHUTDOWN" => {
+                        // Bound hooks for main failures and JVM-initiated shutdown
+                        // without overriding the actual exit code or restart policy.
+                        stopping.get_or_insert_with(Instant::now);
                         let _ = stream.write_all(b"OK\n");
                     }
                     "dump" => {

@@ -44,6 +44,11 @@ function Wait-Event([string] $text) {
 }
 try {
     Invoke-Wrapper install
+    foreach ($timeout in @('invalid', '-1')) {
+        & $binary start $config "wrapper.startup.wait.timeout=$timeout"
+        if ($LASTEXITCODE -eq 0) { throw "Invalid startup wait timeout was accepted: $timeout" }
+        if ((Get-Service $name).Status -ne 'Stopped') { throw 'Invalid startup wait timeout started the service' }
+    }
     Invoke-Wrapper start
     Invoke-Wrapper status
     Wait-Event before
