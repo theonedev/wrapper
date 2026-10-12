@@ -90,6 +90,16 @@ running), and macOS launchd. Installation/removal require administrator/root acc
 ordinary console and detached Unix operation do not. Unix `start` without service
 registration starts a detached supervisor. Windows `start` requires installation.
 Status returns 0 for an active instance and 3 when stopped/not installed.
+Unix `start` and `restart` wait for the JVM bridge to connect. Early failures,
+including a missing Java runtime, are printed to the caller's stderr with a
+nonzero exit code and written to the configured log when file logging is enabled.
+This checks the actual service process, including its account and environment;
+it does not imply that application initialization has finished. Services do not
+load a user's interactive shell setup, so SDKMAN and similar installations should
+use an absolute `wrapper.java.command`.
+Unix startup results are exchanged through private, service-user-owned files in
+`/tmp/servicewrapper-<uid>`, independently of installed PID/log path overrides.
+Each service replaces its result on startup; previous failures are not reused.
 New service registrations preserve the selected configuration file, runtime
 property overrides, and application arguments. Account/password overrides used
 to register a Windows service are excluded from its persisted command line.
@@ -147,8 +157,8 @@ settings include:
   `wrapper.console.loglevel=NONE` and `wrapper.logfile.loglevel=NONE` disable their
   destinations. Other levels preserve the application's unmodified stdout/stderr;
   application filtering remains in your application's logging configuration.
-  Disabling file logging also disables detached startup logging; use `console`
-  to see startup diagnostics.
+  Disabling file logging does not suppress errors returned by startup commands.
+  Use `console` for diagnostics if the supervisor cannot initialize.
 - `wrapper.startup.timeout`, `wrapper.shutdown.timeout` (0 means unlimited),
   `wrapper.restart.delay`, `wrapper.max_failed_invocations`,
   `wrapper.successful_invocation_time`, `wrapper.restart.reload_configuration`,
@@ -156,7 +166,7 @@ settings include:
   Normal exit defaults to shutdown; a crash defaults to restart. Explicit Java API
   stop/restart requests take precedence. `wrapper.restart.disabled=TRUE` disables retries for one-shot commands.
 - `wrapper.pidfile` and `wrapper.startup.wait.timeout` (default 120 seconds for
-  detached startup; 0 waits without a time limit). The PID file is retained empty
+  startup commands; 0 waits without a time limit). The PID file is retained empty
   after shutdown so its OS lock cannot be bypassed by racing unlink/recreation.
 
 The wrapper implements the Java main-class service lifecycle, not the entire JSW product.

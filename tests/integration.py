@@ -154,6 +154,41 @@ wrapper.max_failed_invocations=2
         self.assertNotIn(str(diagnostic), result.stdout)
         self.assertFalse(diagnostic.parent.exists())
 
+    def test_java_launch_errors_are_logged_and_printed_to_stderr(self):
+        missing = self.root / "missing-java"
+        for command in ("console", "start") if os.name != "nt" else ("console",):
+            with self.subTest(command=command):
+                log = self.root / "logs/console.log"
+                log.unlink(missing_ok=True)
+                result = subprocess.run(
+                    [str(self.binary), command, str(self.config), f"wrapper.java.command={missing}"],
+                    capture_output=True, text=True, timeout=10)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(f"Launching {missing}", result.stderr)
+                self.assertNotIn(f"Launching {missing}", result.stdout)
+                self.assertEqual(log.read_text().count(f"Launching {missing}"), 1)
+
+    @unittest.skipIf(os.name == "nt", "Unix service launch environment")
+    def test_service_java_probe_failure_preserves_diagnostics(self):
+        # Model macOS's java shim: executable exists, but no runtime is available
+        # in the service's environment. Run the persisted service invocation.
+        launcher = self.root / "bin/service.sh"
+        shutil.copy2(PROJECT / "resources/App.sh.in", launcher)
+        launcher.chmod(0o755)
+        java = self.root / "bin/java"
+        java.write_text('#!/bin/sh\necho "Unable to locate a Java Runtime" >&2\nexit 1\n')
+        java.chmod(0o755)
+        environment = dict(os.environ, PATH=str(java.parent) + os.pathsep + os.environ["PATH"])
+        result = subprocess.run(
+            [str(launcher), "--service", "console", str(self.config),
+             "wrapper.pidfile=../bin/installed.pid", "wrapper.logfile=../logs/installed.log", "--"],
+            env=environment, capture_output=True, text=True, timeout=10)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Java version check failed: Unable to locate a Java Runtime", result.stderr)
+        self.assertIn("Java version check failed: Unable to locate a Java Runtime",
+                      (self.root / "logs/installed.log").read_text())
+        self.assertEqual((self.root / "bin/installed.pid").read_text(), "")
+
     @unittest.skipIf(os.name == "nt", "Unix helpers escaping the probe process group")
     def test_java_probe_with_detached_helper(self):
         executable = self.root / "fake java"

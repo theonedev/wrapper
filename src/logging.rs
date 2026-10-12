@@ -14,7 +14,15 @@ pub struct Log {
 }
 impl Log {
     pub fn new(config: &Config, console: bool) -> Result<Self> {
-        let redirect = !console;
+        Self::open(config, console, !console)
+    }
+    pub fn error(config: &Config, error: &anyhow::Error) -> Result<()> {
+        let log = Self::open(config, false, false)?;
+        log.message(&format!("{error:#}"));
+        log.close();
+        Ok(())
+    }
+    fn open(config: &Config, console: bool, redirect: bool) -> Result<Self> {
         let mut file = None;
         let path = config.path("wrapper.logfile", "../logs/console.log");
         if !config

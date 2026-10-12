@@ -276,8 +276,12 @@ pub fn start(options: &Options, config: &Config) -> Result<i32> {
     let start = Instant::now();
     while timeout == 0 || start.elapsed() < Duration::from_secs(timeout) {
         if let Some(status) = child.try_wait()? {
+            let failure = crate::startup::read(&config, unsafe { libc::geteuid() })?
+                .filter(|record| record.pid == child.id() && record.state == "STOPPED")
+                .map(|record| format!("; {}", record.message))
+                .unwrap_or_default();
             bail!(
-                "{} failed to start ({status}); {diagnostics}",
+                "{} failed to start ({status}){failure}; {diagnostics}",
                 config.name()
             );
         }
@@ -306,20 +310,77 @@ pub fn stop(config: &Config) -> Result<i32> {
     Ok(0)
 }
 
-pub fn run(options: &Options, mut state_changed: impl FnMut(State) -> Result<()>) -> Result<i32> {
+pub fn run(options: &Options, state_changed: impl FnMut(State) -> Result<()>) -> Result<i32> {
     #[cfg(unix)]
     crate::service::switch_user(&options.load()?)?;
     // Reload after an account switch to apply set.* overrides to the account's environment.
     let initial = options.load()?;
+    let result = run_supervisor(options, initial.clone(), state_changed);
+    // Detached Unix stderr is already redirected to the rotating log; SCM logs
+    // its failures itself. Console services (including launchd/systemd) need an
+    // explicit file entry as their stderr may never reach an operator.
+    if let Err(error) = &result
+        && !matches!(options.command.as_str(), "daemon" | "service")
+        && let Err(log_error) = Log::error(&options.load().unwrap_or(initial), error)
+    {
+        eprintln!("ServiceWrapper: Unable to log startup failure: {log_error:#}");
+    }
+    result
+}
+
+fn run_supervisor(
+    options: &Options,
+    initial: Config,
+    mut state_changed: impl FnMut(State) -> Result<()>,
+) -> Result<i32> {
     let listener = TcpListener::bind(("127.0.0.1", 0))?;
     listener.set_nonblocking(true)?;
-    let mut pending = Vec::new();
     let mut random = [0u8; 32];
     getrandom::fill(&mut random)
         .map_err(|e| anyhow::anyhow!("Random number generation failed: {e}"))?;
     let token: String = random.iter().map(|b| format!("{b:02x}")).collect();
     let port = listener.local_addr()?.port();
     let _instance = Instance::acquire(&initial, port, &token)?;
+    #[cfg(unix)]
+    let startup = if options.internal || options.command == "daemon" {
+        Some(crate::startup::Report::new(&initial, &token)?)
+    } else {
+        None
+    };
+    let result = run_instance(options, initial, listener, token, |state| {
+        #[cfg(unix)]
+        if let Some(startup) = &startup {
+            startup.write(
+                match state {
+                    State::Starting => "STARTING",
+                    State::Running => "RUNNING",
+                    State::Stopping => "STOPPING",
+                },
+                "",
+            )?;
+        }
+        state_changed(state)
+    });
+    #[cfg(unix)]
+    if let Some(startup) = startup {
+        let message = match &result {
+            Ok(code) => format!("Service exited with code {code}"),
+            Err(error) => format!("{error:#}"),
+        };
+        startup.write("STOPPED", &message)?;
+    }
+    result
+}
+
+fn run_instance(
+    options: &Options,
+    initial: Config,
+    listener: TcpListener,
+    token: String,
+    mut state_changed: impl FnMut(State) -> Result<()>,
+) -> Result<i32> {
+    let port = listener.local_addr()?.port();
+    let mut pending = Vec::new();
     let signaled = Arc::new(AtomicBool::new(false));
     let handler = signaled.clone();
     // SCM services have no console. Their control handler sets STOP directly.

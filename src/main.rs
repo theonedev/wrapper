@@ -3,6 +3,8 @@ mod config;
 mod java;
 mod logging;
 mod service;
+#[cfg(unix)]
+mod startup;
 mod supervisor;
 
 use anyhow::{Context, Result, bail, ensure};

@@ -133,4 +133,18 @@ if [ -e "/etc/init.d/$TEST_NAME" ] && [ ! -d /run/systemd/system ]; then
         [ "$?" = 3 ]
     fi
 fi
+# Java discovery failures must reach both the log and the operator, even when
+# native installation saved a different PID path. A later healthy start must not
+# reuse the previous failure.
+cp "$CONFIG" "$TEST_ROOT/working.conf"
+echo "wrapper.java.command=$TEST_ROOT/missing-java" >> "$CONFIG"
+if start_installed > "$TEST_ROOT/start-out" 2> "$TEST_ROOT/start-err"; then
+    echo 'Missing Java must fail the start command' >&2; exit 1
+fi
+grep -q 'Launching .*missing-java' "$TEST_ROOT/start-err"
+grep -q 'Launching .*missing-java' "$TEST_ROOT/logs/console.log"
+cp "$TEST_ROOT/working.conf" "$CONFIG"
+start_installed
+invoke status
+invoke stop
 echo 'Unix service acceptance test passed'
