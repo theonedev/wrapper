@@ -2,6 +2,7 @@
 name = "wrapper"
 description = "Cross-platform service supervisor for Java applications"
 repository = "https://code.onedev.io/onedev/wrapper"
+readme = "README.md"
 version = "1.0.0"
 edition = "2024"
 license = "MIT"

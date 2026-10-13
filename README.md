@@ -1,338 +1,84 @@
 # Wrapper
 
-A Rust service supervisor for Java applications, with Bash and Windows batch
-launchers. It installs and manages services on Windows, macOS, and Linux, launches
-Java directly, rotates output logs, and handles JVM-requested restarts. JVM options and
-service settings are configured in `conf/wrapper.conf`.
+Run an existing Java application as a service on **macOS, Windows, or Linux**.
+Wrapper is an MIT-licensed native supervisor that starts Java, forwards service
+stops to shutdown hooks, and captures and rotates stdout/stderr logs.
 
-This standalone project is maintained at
-[code.onedev.io/onedev/wrapper](https://code.onedev.io/onedev/wrapper).
-It works with any Java application exposing a main method.
+Your application needs Java 17+ and a `public static void main(String[] args)`.
+Integration is manual: copy files and edit `wrapper.conf`. Your application needs
+no Wrapper API dependency, build plugin, or JNI library.
 
-## Use with a Java application
+## Quick start
 
-Download `wrapper-VERSION.tar.gz` from the
-[public download site](https://code.onedev.io/onedev/wrapper/~sites/public/),
-extract it, put your application jars in `lib`, and edit `conf/wrapper.conf`:
+1. Download [wrapper-latest.tar.gz](https://code.onedev.io/onedev/wrapper/~sites/public/wrapper-latest.tar.gz)
+   ([SHA-256](https://code.onedev.io/onedev/wrapper/~sites/public/wrapper-latest.tar.gz.sha256))
+   and extract it. This prebuilt package includes all supported platforms.
+   Use the extracted directory as your application distribution, or follow the
+   [integration guide](docs/integration.md) to copy Wrapper into an existing layout.
+2. Put your application JAR and its runtime dependencies in `lib/`.
+3. Edit the existing entries in `conf/wrapper.conf`:
 
-```properties
-wrapper.name=my-app
-wrapper.displayname=My Application
-wrapper.java.mainclass=com.example.Main
-wrapper.java.classpath.1=../lib/*.jar
-wrapper.java.additional.1=-Xmx1g
-wrapper.app.parameter.1=--port
-wrapper.app.parameter.2=8080
-```
+   ```properties
+   wrapper.name=my-app
+   wrapper.displayname=My Application
+   wrapper.description=My Java application
+   wrapper.java.mainclass=com.example.Main
+   wrapper.java.classpath.1=../lib/*.jar
+   ```
 
-Run `bin/service.sh console` (Windows: `bin\service.bat console`) first, then
-`install` and `start` to register and run a service. The application only needs a
-normal `public static void main(String[] args)` entry point; no wrapper API is
-required. Java shutdown hooks run when the service stops. Scripts can be renamed,
-for example to `my-app.sh` and `my-app.bat`; the service name comes from the config.
-Prefer `wrapper.app.parameter.N` for arguments that should also apply at boot.
+   For a JAR normally run with `java -jar`, use its manifest's `Main-Class` value.
+   For Spring Boot, this is the Boot launcher class; see the
+   [executable JAR instructions](docs/integration.md#executable-jars-and-spring-boot).
+4. From the application directory, run:
 
-Applications that need to request their own restart or stop can compile against
-`boot/wrapper.jar` and call `io.onedev.wrapper.WrapperManager.restartAndReturn()`
-or `stopAndReturn(int)`. The launcher class is
-`io.onedev.wrapper.WrapperSimpleApp`. The bridge requires no JNI library.
-Applications and wrapper configurations using an earlier Java API package must
-be updated together with `wrapper.jar` and the native executables.
-See the compatibility limits below before migrating existing integrations.
+   ```sh
+   bin/service.sh console
+   ```
 
-## Platforms
+   On Windows, run `.\bin\service.bat console`. Check `logs/console.log` and press
+   Ctrl+C to stop. A service must keep at least one non-daemon thread alive.
+5. Move the distribution to its permanent location and set `wrapper.java.command`
+   to the target machine's Java executable, preferably an absolute path. Then install
+   and start it on macOS/Linux:
 
-| Platform | Rust target | Distribution executable |
+   ```sh
+   sudo bin/service.sh install
+   sudo bin/service.sh start
+   ```
+
+   On Windows, run `.\bin\service.bat install` and `.\bin\service.bat start`;
+   the launcher requests administrator permission when needed.
+
+Paths in the default configuration are relative to `boot/`. For applications
+that expect to run from their top-level directory, use the
+[working directory instructions](docs/integration.md#working-directory).
+Ordinary JVM exits stop Wrapper; automatic crash restart is not implemented.
+
+## Supported platforms
+
+| Operating system | Architecture | Service manager |
 | --- | --- | --- |
-| Windows amd64 | `x86_64-pc-windows-msvc` | `wrapper-windows-x86-64.exe` |
-| Windows arm64 | `aarch64-pc-windows-msvc` | `wrapper-windows-arm-64.exe` |
-| Apple Silicon | `aarch64-apple-darwin` | `wrapper-macosx-arm-64` |
-| Linux amd64 | `x86_64-unknown-linux-musl` | `wrapper-linux-x86-64` |
-| Linux arm64 | `aarch64-unknown-linux-musl` | `wrapper-linux-arm-64` |
+| macOS | Apple Silicon (arm64) | launchd |
+| Windows | amd64, arm64 | Windows Service Control Manager |
+| Linux | amd64, arm64 | systemd; SysV fallback |
 
-Linux executables are statically linked with musl, and Windows executables use the
-static C runtime. The Java application still needs Java 17 or newer. Intel macOS
-and 32-bit systems are not supported.
+Install Java 17+ for the target platform, or bundle it with your application.
+Unix launchers require Bash and standard OS utilities. Linux executables are
+statically linked with musl; Windows executables use the static C runtime.
 
-## Commands
+## Documentation
 
-Generic entry points are `bin/service.sh` on Unix and `bin/service.bat` on Windows.
-The Bash launcher also recognizes Git Bash/MSYS on supported Windows architectures.
+- [Integrate an existing application](docs/integration.md): copying, configuration, and JVM options.
+- [Run the Java example](examples/hello-service/README.md): compile and try a small service.
+- [Manage services](docs/services.md): accounts, commands, logs, and upgrades.
+- [Configuration reference](docs/reference.md): syntax, lifecycle, and compatibility.
+- [Development guide](docs/development.md): install build tools, build Wrapper, and publish releases.
+- [Contributing](CONTRIBUTING.md): project layout and contribution checks.
 
-```sh
-bin/service.sh install
-bin/service.sh start
-bin/service.sh status
-bin/service.sh restart
-bin/service.sh stop
-bin/service.sh remove
-bin/service.sh console
-bin/service.sh dump
-```
+Source and issue tracker: [code.onedev.io/onedev/wrapper](https://code.onedev.io/onedev/wrapper).
 
-`console` runs the application in the foreground with its output in the terminal;
-press Ctrl+C to stop it. On Unix, run `dump` from another terminal to request a
-thread dump from the running JVM. The dump appears in the application's console
-output and `logs/console.log` with the default logging configuration. Windows
-supports `console`, but not `dump`.
-For a systemd or launchd service installed with a `wrapper.pidfile` override,
-pass the same override to the wrapper binary's `dump` command. Dump requests
-locate the control file directly instead of querying the service manager.
+## License
 
-`installstart` installs and starts. `condrestart` restarts only a running instance.
-Application arguments preserve boundaries, spaces, and exit codes. To create a utility
-command launcher, change its `--script` argument to `--command`: its filename is
-prepended to the application's arguments and file logging is disabled. All launchers
-stop the wrapper when the JVM exits, unless the JVM explicitly requests a restart.
-
-Service registration uses Windows SCM, Linux systemd (or SysV when systemd is not
-running), and macOS launchd. Installation/removal require administrator/root access;
-ordinary console and detached Unix operation do not. On Windows, `install`,
-`installstart`, and `remove` request permission through UAC when run without
-administrator privileges, then wait for the elevated command and return its exit
-code. `start`, `stop`, `restart`, and `condrestart` also request UAC permission if
-Windows denies access, while operations already permitted to the caller run
-without a prompt. `console` and `status` never request elevation. Cancelling a
-prompt returns an error. Elevated command failures, including JVM startup
-diagnostics, are returned to the original terminal even when file logging is
-disabled. Unix `start` without service
-registration starts a detached supervisor. Windows `start` requires installation.
-On macOS, `start`, `stop`, `restart`, and `condrestart` for an installed system
-service also require root; run these commands with `sudo`. This applies even if
-the service runs under your own account. `status` does not require root.
-Status prints only the state, such as `RUNNING` or `STOPPED`, without a service-name
-prefix. It returns 0 for an active instance and 3 when stopped/not installed.
-Without service registration, `start` prints `Starting...` and then `Started`;
-`stop` prints `Stopping...` and then `Stopped`. Installed services retain
-`Starting service...` / `Service started` and `Stopping service...` / `Service stopped`.
-Startup waits for the JVM's wrapper handshake. Missing or unusable Java executables, Java
-version failures, and invalid JVM options are reported in the terminal as well
-as the configured log. This confirms JVM startup; application class loading and
-initialization happen afterward and their errors remain in the log.
-Services do not load a user's interactive shell setup, so SDKMAN and similar
-installations should use an absolute `wrapper.java.command`.
-`stop`, `install`, and `remove` also print a progress message and confirm successful
-completion. Unix `dump` prints
-`Thread dump requested, please check console log after a while` once the supervisor
-acknowledges the request; the JVM writes the dump asynchronously.
-The same behavior applies to detached starts and installed Windows, systemd,
-launchd, and SysV services. Startup diagnostics retain their last 64 KiB independently
-of log rotation. On Unix, an owner-only `.startup` result beside the PID file is
-retained after exit so even an immediately failing JVM can be reported to `start`.
-New service registrations preserve the selected configuration file, runtime
-property overrides, and application arguments. Account/password overrides used
-to register a Windows service are excluded from its persisted command line.
-Remove and reinstall existing services to update their saved launch arguments.
-On SysV, management commands use the installed init script and its saved arguments.
-Installed systemd and launchd services use the service manager for status and
-conditional restart, including when installation overrides the PID-file location.
-On Unix, stop and remove a service before deleting its service account. Management
-commands need that account to resolve account-dependent configuration paths.
-Changing the Unix service account requires stopping and starting the wrapper;
-JVM-only restarts reject account changes. Reinstall native services to update
-their registered account.
-
-Existing systemd units invoking `service.sh start sysd` and launchd plists invoking
-`service.sh launchdinternal` remain supported. All platforms use `wrapper.name`
-as the service name: the launchd label on macOS, systemd unit basename or SysV
-script name on Linux, and SCM service name on Windows. Stop and remove a service
-using its old wrapper before migrating a service name, then install it with the
-new wrapper and configuration. The Windows `-s <config>` service entry point and
-amd64 executable filename remain unchanged. Configuration filenames,
-boot-relative paths, `.shconf`, `RUN_AS_USER`, and `FILES_TO_SOURCE` remain supported.
-
-Stop a deployment before replacing its wrapper files.
-Control files append `.control` to the complete PID filename (for example,
-`service.pid.control`), so distinct PID filenames keep separate control endpoints.
-
-## Configuration compatibility
-
-`conf/wrapper.conf` remains a UTF-8 properties file, not a shell script. Supported
-settings include:
-
-- `wrapper.java.command`, `wrapper.java.version.min`, `wrapper.java.mainclass`.
-- Numbered `wrapper.java.classpath.N`, `wrapper.java.library.path.N`,
-  `wrapper.java.additional.N`, and `wrapper.app.parameter.N`. Entries are sorted
-  numerically and may have gaps. Classpath wildcards apply to filenames.
-- `wrapper.java.library.path.append_system_path`, `wrapper.java.initmemory`,
-  `wrapper.java.maxmemory`, and `wrapper.working.dir`.
-- `%ENVIRONMENT_VARIABLE%`, `set.NAME`, `set.default.NAME`, optional `#include`,
-  and `#include.required`. Include paths are relative to `boot`. Recursive includes
-  are rejected. `##` represents a literal hash in property values; a single hash begins a comment.
-  Environment assignments can extend existing values (for example,
-  `set.PATH=../tools:%PATH%` on Unix); existing references are captured when assigned,
-  and references defined later are resolved after reading the configuration.
-  Environment names are case-insensitive on Windows and case-sensitive on Unix.
-  Expanded values are limited to 1 MiB to bound malformed or cyclic references.
-- `wrapper.name`, `wrapper.displayname`, `wrapper.description`, and Unix
-  `wrapper.daemon.user` (or `RUN_AS_USER` in the launcher/`.shconf`). Unix service
-  names use letters, digits, dots, underscores, and hyphens. `wrapper.script` supplies
-  the Unix launcher path when installing through the binary directly (default
-  `../bin/service.sh`); scripts supply their own path automatically.
-- Windows `wrapper.ntservice.account`, `wrapper.ntservice.password`, numbered
-  `wrapper.ntservice.dependency.N`, and `wrapper.ntservice.starttype` with
-  `AUTO_START`, `DELAY_START`, or `DEMAND_START`. A custom account must have the
-  Windows right to log on as a service. Service registration changes require
-  remove/install, just as before.
-- `wrapper.logfile`, `wrapper.logfile.maxsize` (bytes, `k`, or `m`), and
-  `wrapper.logfile.maxfiles` (0 keeps all rotated files).
-  `wrapper.console.loglevel=NONE` and `wrapper.logfile.loglevel=NONE` disable their
-  destinations. Other levels preserve the application's unmodified stdout/stderr;
-  application filtering remains in your application's logging configuration.
-  Disabling file logging does not disable startup error reporting in the `start`
-  command's terminal.
-- `wrapper.startup.timeout`, `wrapper.shutdown.timeout` (0 means unlimited),
-  `wrapper.restart.delay`, and `wrapper.restart.reload_configuration`.
-  JVM exit, failure, or timeout stops the wrapper. Explicit Java API restart requests
-  are honored without a limit; an operator's stop takes precedence.
-  Legacy `wrapper.on_exit.*`, `wrapper.max_failed_invocations`,
-  `wrapper.successful_invocation_time`, and `wrapper.restart.disabled` settings are
-  accepted but have no effect.
-- `wrapper.pidfile` and `wrapper.startup.wait.timeout` (default 120 seconds for
-  startup confirmation; 0 waits without a time limit). The PID file is retained empty
-  after shutdown so its OS lock cannot be bypassed by racing unlink/recreation.
-
-The wrapper implements the Java main-class service lifecycle, not the entire JSW product.
-JSW JNI, localization, console formatting/title, syslog, CPU/ping monitor,
-auto-bitness, sequence-gap, and console-input settings are inert compatibility
-entries. In particular, no JVM responsiveness/ping watchdog is implemented.
-Network-share mappings, output filters,
-event/timer actions, interactive services, pause/resume, and arbitrary WrapperListener
-integrations are not implemented. Active share/filter/event/timer properties and
-interactive services fail with a diagnostic instead of being silently accepted.
-Other unknown properties are ignored for compatibility. Users depending on advanced
-JSW features should review this list before migration.
-
-The supervisor launches Java directly, without evaluating JVM options in a shell.
-Control uses an authenticated loopback connection. The token file is owner-only on
-Unix and restricted to its owner, Administrators, and LocalSystem on Windows.
-Stopping invokes Java shutdown hooks; configured timeouts force termination when
-necessary, including when the application calls `System.exit()` or its last
-non-daemon thread returns. Unix process groups and Windows job objects clean up
-JVM descendants.
-The Java bridge also initiates shutdown when its supervisor connection is lost,
-and forcibly exits if hooks exceed `wrapper.shutdown.timeout`. For this parent-loss
-case only, an unlimited timeout (`0`) uses a 30-second fallback.
-Control remains available during delays between JVM-requested restarts.
-The Java version probe also observes `wrapper.startup.timeout` and remains
-cancellable through stop commands and termination signals.
-Custom Unix Java launchers and application helpers must stay in the inherited
-process group. Helpers that create a separate session or process group can escape
-cleanup. Keeping the application JVM's inherited stdout/stderr pipes open can
-also delay supervisor shutdown beyond the configured timeout. The Java version
-probe remains cancellable and bounded by its configured timeout even in this case.
-
-## Build and package
-
-On Apple Silicon macOS (with Homebrew and Xcode Command Line Tools) or
-amd64/arm64 Linux (Debian/Ubuntu with apt-get, or Fedora with dnf), run:
-
-```sh
-./install.sh
-./build.sh
-```
-
-Run the installer as your normal user; it uses sudo for missing system packages.
-It reuses JDK 17+ and Python 3.11+ when available and installs the pinned Rust
-toolchain plus Zig and cargo-zigbuild on Linux. `build.sh` automatically loads the
-generated environment file when present; no shell setup is required.
-Rerunning the installer reuses the saved tool paths and preserves cross-compilers
-installed by an earlier `--all` run, even when `--all` is omitted on a later run.
-Use `./install.sh --all` to also install cross-compilation tools and all five Rust
-targets. On Linux, the macOS SDK must still be supplied separately via `SDKROOT`.
-
-On Windows amd64 or arm64, run from Command Prompt or PowerShell:
-
-```bat
-.\install.bat
-.\build.bat
-```
-
-The Windows installer uses WinGet (App Installer) for missing JDK 17+, Python
-3.11+, Rustup, and Visual Studio 2022 C++ Build Tools with the Windows SDK.
-Run it as your normal user; system installers request elevation when needed.
-It installs the pinned Rust toolchain and the host's Windows target. Use
-`.\install.bat --all` to install both Windows targets and the ARM64 MSVC tools,
-then `.\build.bat x86_64-pc-windows-msvc aarch64-pc-windows-msvc` to build both.
-The batch build supports Windows targets; use `build.sh` for Linux and macOS.
-It writes the Java bridge and static-runtime executables to `dist\boot`.
-Run `.\build.bat clean` to remove Rust artifacts (honoring `CARGO_TARGET_DIR`),
-`build`, and `dist`.
-
-Use Rust 1.96.1, JDK 17+, and Python 3.11+. `Cargo.lock` fixes dependency versions.
-For cross-compilation install Zig 0.16.0, `cargo-zigbuild` 0.23.4, and `cargo-xwin`
-0.23.1. Windows cross-compilation also needs LLVM's `clang-cl` and `lld-link`;
-`cargo-xwin` downloads the Microsoft SDK/CRT. Native Windows builds use MSVC tools.
-macOS builds run natively on Apple Silicon, or cross-compile from Linux with Zig
-and a macOS SDK (`SDKROOT`; defaults to `/opt/MacOSX11.3.sdk` on Linux).
-
-```sh
-rustup target add aarch64-apple-darwin \
-  x86_64-unknown-linux-musl aarch64-unknown-linux-musl \
-  x86_64-pc-windows-msvc aarch64-pc-windows-msvc
-./build.sh aarch64-apple-darwin \
-  x86_64-unknown-linux-musl aarch64-unknown-linux-musl \
-  x86_64-pc-windows-msvc aarch64-pc-windows-msvc
-python3 package.py --archive dist/artifacts
-```
-
-`build.sh` without arguments builds for the host (using a static musl target on
-Linux). Outputs go to `dist/boot`. Run `./build.sh clean` to remove Rust build
-artifacts (honoring `CARGO_TARGET_DIR`), generated Java files, and distributions
-under `build` and `dist`.
-
-`package.py` requires all five
-binaries, verifies their architecture, collects dependency license texts in
-`wrapper.jar`, and writes `SHA256SUMS`. The output is `dist/release/wrapper`.
-Use `--destination` to choose another output directory. `--archive` additionally
-writes a versioned archive and SHA-256 file to the supplied directory.
-Vendored license texts include pinned provenance in `licenses/sources.json`.
-Build caches and binaries are ignored; release downloads are published by CI.
-
-The OneDev **Release** job checks formatting, runs Rust tests and clippy, builds all
-five targets, runs JVM integration and service-account tests on its Linux host,
-and publishes the archive and its checksum to the public download site through a
-`PublishSiteStep`. The site lists the files from the latest successful publication.
-It uses `1dev/buildenv` and runs manually with `tod build run Release --branch main`. The buildenv project
-must first publish the image containing Rust 1.96.1, Zig, cargo-zigbuild,
-cargo-xwin, LLVM, and the macOS SDK. Windows SDK/CRT downloads require network
-access during the first cross-build. No CI step installs tools into a later step's
-isolated environment, and no application source is needed to produce the wrapper.
-
-## Verification
-
-```sh
-cargo test --locked
-cargo clippy --locked --all-targets -- -D warnings
-python3 tests/integration.py
-bash tests/linux-smoke.sh
-```
-
-The integration suite requires localhost sockets and launches only temporary JVM
-fixtures. It checks configuration, quoting, shutdown hooks, forced shutdown, startup
-timeouts, duplicate starts, authenticated control, restarts with configuration reload,
-parent death, exit without relaunch, repeated JVM-requested restarts, log rotation,
-and launcher/maintenance arguments.
-The Linux smoke test also runs in a disposable Java 17 container with this project
-mounted read-only. Run each architecture's binary on its corresponding host or emulator.
-
-`tests/service-unix.sh` and `tests/service.ps1` test actual OS service installation,
-restart, shutdown hooks, and removal using a unique fixture service. Run these as
-administrator/root on disposable hosts, never against a production instance.
-`tests/native-startup.py` exercises systemd/launchd startup confirmation and
-diagnostic forwarding with mocked service managers and a real JVM. It also checks
-saved installation overrides and execution of launchers as the service account;
-run it as root on a disposable Unix host.
-
-Validated during this implementation: all five release binaries built; Rust
-unit tests and macOS JVM integration tests passed; Linux arm64 and amd64
-lifecycle and service-account tests passed in containers (amd64 under emulation).
-SysV service installation, restart, shutdown, and removal passed in a disposable
-Linux container.
-Native SCM, launchd, and systemd installation acceptance is a release gate and has
-not been run on this development machine.
-
-Service APIs follow the primary documentation for
-[Windows services](https://docs.rs/windows-service/0.8.1/windows_service/),
-[systemd services](https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html),
-and [launchd jobs](https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/CreatingLaunchdJobs.html).
+Source, Java bridge, launchers, documentation, and examples use the [MIT license](LICENSE).
+Keep `LICENSE` and the release's `THIRD-PARTY-LICENSES.txt` when redistributing
+Wrapper. Your application can use its own license.

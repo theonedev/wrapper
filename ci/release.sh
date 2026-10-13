@@ -17,5 +17,14 @@ cargo clippy --locked --all-targets -- -D warnings
 python3 tests/integration.py
 bash tests/linux-smoke.sh
 python3 tests/native-startup.py
-rm -rf dist/artifacts
+rm -rf dist/artifacts dist/site dist/release/wrapper
 python3 package.py --archive dist/artifacts
+
+# Keep versioned build artifacts and publish identical bytes at the stable site URL.
+WRAPPER_VERSION=$(cat dist/release/wrapper/VERSION)
+mkdir -p dist/site
+cp "dist/artifacts/wrapper-$WRAPPER_VERSION.tar.gz" dist/site/wrapper-latest.tar.gz
+(
+    cd dist/site
+    sha256sum wrapper-latest.tar.gz > wrapper-latest.tar.gz.sha256
+)

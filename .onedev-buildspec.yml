@@ -22,10 +22,16 @@ jobs:
     useTTY: false
     condition: SUCCESSFUL
     optional: false
-  - type: PublishSiteStep
-    name: publish public site
+  - type: PublishArtifactStep
+    name: publish versioned package
     sourcePath: dist/artifacts
-    siteFiles: '*.tar.gz *.sha256'
+    artifacts: wrapper-*.tar.gz wrapper-*.tar.gz.sha256
+    condition: SUCCESSFUL
+    optional: false
+  - type: PublishSiteStep
+    name: publish latest package
+    sourcePath: dist/site
+    siteFiles: wrapper-latest.tar.gz wrapper-latest.tar.gz.sha256
     condition: SUCCESSFUL
     optional: false
   retryCondition: never
