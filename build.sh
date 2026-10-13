@@ -2,6 +2,11 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+ENV_FILE=${XDG_DATA_HOME:-$HOME/.local/share}/onedev-wrapper/env.sh
+if [ -f "$ENV_FILE" ]; then
+    source "$ENV_FILE"
+fi
+
 if [ "${1:-}" = clean ]; then
     if [ "$#" -ne 1 ]; then
         echo "Usage: $0 clean" >&2

@@ -216,6 +216,23 @@ probe remains cancellable and bounded by its configured timeout even in this cas
 
 ## Build and package
 
+On Apple Silicon macOS (with Homebrew and Xcode Command Line Tools) or
+amd64/arm64 Linux (Debian/Ubuntu with apt-get, or Fedora with dnf), run:
+
+```sh
+./install.sh
+./build.sh
+```
+
+Run the installer as your normal user; it uses sudo for missing system packages.
+It reuses JDK 17+ and Python 3.11+ when available and installs the pinned Rust
+toolchain plus Zig and cargo-zigbuild on Linux. `build.sh` automatically loads the
+generated environment file when present; no shell setup is required.
+Rerunning the installer reuses the saved tool paths and preserves cross-compilers
+installed by an earlier `--all` run, even when `--all` is omitted on a later run.
+Use `./install.sh --all` to also install cross-compilation tools and all five Rust
+targets. On Linux, the macOS SDK must still be supplied separately via `SDKROOT`.
+
 Use Rust 1.96.1, JDK 17+, and Python 3.11+. `Cargo.lock` fixes dependency versions.
 For cross-compilation install Zig 0.16.0, `cargo-zigbuild` 0.23.4, and `cargo-xwin`
 0.23.1. Windows cross-compilation also needs LLVM's `clang-cl` and `lld-link`;
