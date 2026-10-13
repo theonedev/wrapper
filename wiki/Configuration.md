@@ -1,6 +1,6 @@
 # Command and configuration reference
 
-[Home](../README.md) · [Integration](integration.md) · [Services](services.md)
+[Home](Home.md) · [Integration](Integration.md) · [Services](Services.md)
 
 ## Commands
 
@@ -31,7 +31,7 @@ overrides used at installation are excluded from the saved command line.
 Service installation/removal needs administrator/root access. On Windows, service
 management requests UAC elevation when required; `console` and `status` never do.
 On Unix, use `sudo` to manage installed system services. See
-[service administration](services.md) for accounts and permissions.
+[service administration](Services.md) for accounts and permissions.
 
 ### Direct binary use
 

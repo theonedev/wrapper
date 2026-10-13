@@ -1,6 +1,6 @@
 # Manage services
 
-[Home](../README.md) · [Integration](integration.md) · [Reference](reference.md)
+[Home](Home.md) · [Integration](Integration.md) · [Reference](Configuration.md)
 
 First test the application with `console`. Place it at its permanent location,
 set a unique `wrapper.name`, and select Java with `wrapper.java.command`.
@@ -38,7 +38,7 @@ service. Removal unregisters it; your application files remain in place.
 On Unix, `start` without registration runs a detached process; it does not enable
 startup at boot. Windows requires installation before `start`. `installstart`
 combines installation and startup; `condrestart` restarts only an active instance.
-See the [command reference](reference.md#commands) for the full list.
+See the [command reference](Configuration.md#commands) for the full list.
 
 ## Service accounts
 
@@ -77,7 +77,7 @@ Use your application's logging framework to filter individual messages.
 | --- | --- |
 | Java cannot be found | Set an absolute `wrapper.java.command`; check Java 17+ and your application's required version. |
 | `ClassNotFoundException` | Check the main class and classpath. Executable JARs use the manifest's `Main-Class`. |
-| Missing configuration or data files | Paths default to `boot/`; see [working directory](integration.md#working-directory). |
+| Missing configuration or data files | Paths default to `boot/`; see [working directory](Integration.md#working-directory). |
 | `Started` followed by exit | Startup confirms the bridge handshake, not application readiness. Read the logs and ensure a non-daemon thread remains alive. |
 | Permission denied | Check the service account's directory traversal, read/execute, and log/PID/data write permissions. |
 | Application stays stopped after a crash | Ordinary JVM exits stop Wrapper; automatic crash retry is not implemented. |

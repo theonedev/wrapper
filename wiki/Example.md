@@ -1,10 +1,13 @@
-# Hello service
+# Hello service example
+
+[Home](Home.md) · [Integration](Integration.md) · [Services](Services.md)
 
 A plain Java main method with stdout logging, arguments, and a shutdown hook.
 It stays alive until stopped and has no Wrapper API or framework dependency.
-The source is covered by Wrapper's [MIT license](../../LICENSE).
+[HelloService.java](../examples/hello-service/HelloService.java) is covered by
+Wrapper's [MIT license](../LICENSE).
 
-[Download the prebuilt Wrapper package](../../docs/integration.md#download-wrapper)
+[Download the prebuilt Wrapper package](Integration.md#download-wrapper)
 and start in its **freshly extracted directory**, with JDK 17+ tools (`javac`, `jar`,
 and `java`) on `PATH`. The package includes this example and the runtime layout.
 
@@ -64,5 +67,5 @@ wrapper.java.additional.1=-Dhello.greeting=Hello from configuration
 
 Compiling and running in console mode does not register an OS service. To try
 registration, select an absolute Java path and follow the
-[service guide](../../docs/services.md). To package your own application, follow
-the [integration guide](../../docs/integration.md).
+[service guide](Services.md). To package your own application, follow
+the [integration guide](Integration.md).

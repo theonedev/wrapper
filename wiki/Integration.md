@@ -1,6 +1,6 @@
 # Integrate an existing Java application
 
-[Home](../README.md) · [Services](services.md) · [Reference](reference.md)
+[Home](Home.md) · [Services](Services.md) · [Reference](Configuration.md)
 
 Keep your application's main method and shutdown hooks. You need a Java 17+
 runtime, your application's JARs, and the prebuilt Wrapper package. Build your
@@ -15,7 +15,7 @@ directory with binaries for every supported platform. The download URL stays the
 same across releases; the included `VERSION` file identifies the release.
 
 Use this extracted directory in the steps below. Building Wrapper from source
-is covered separately in the [development guide](development.md).
+is covered separately in the [development guide](Development.md).
 
 ## 1. Copy the runtime files
 
@@ -160,13 +160,13 @@ A long-running service must keep a non-daemon thread alive. An ordinary JVM exit
 stops Wrapper. Arguments after `console` are appended to configured application
 arguments; for example, `bin/service.sh console --port 8081`.
 
-The [Hello service example](../examples/hello-service/README.md) provides a small
+The [Hello service example](Example.md) provides a small
 application to try before integrating your own.
 
 ## 4. Install and distribute
 
 Move the application to its permanent location, select Java as described below,
-and follow the [service guide](services.md) to install and start it. Each instance
+and follow the [service guide](Services.md) to install and start it. Each instance
 needs a unique `wrapper.name` and separate log/PID paths; separate application
 directories are the simplest arrangement. You can rename the launchers to
 `my-app.sh` and `my-app.bat` without changing the service name.

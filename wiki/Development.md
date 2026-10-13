@@ -1,7 +1,9 @@
 # Development guide
 
+[Home](Home.md) · [Integration](Integration.md) · [Contributing](Contributing.md)
+
 These instructions are for developers working on a **Wrapper source checkout**.
-For normal use, [download the prebuilt package](integration.md#download-wrapper)
+For normal use, [download the prebuilt package](Integration.md#download-wrapper)
 and follow the manual integration guide.
 
 ## Build a local release
@@ -32,7 +34,7 @@ The build produces the Java bridge and host executable in `dist/boot/`.
 `package.py` is a maintainer tool that assembles a Wrapper release from those
 outputs. The destination must be new; choose another `--destination` for subsequent
 runs. From `dist/local-wrapper/`, follow the
-[Hello service instructions](../examples/hello-service/README.md) to compile and
+[Hello service instructions](Example.md) to compile and
 run the example manually. A host-only release contains one native executable.
 
 Both build scripts accept `clean` to remove Rust artifacts, `build/`, and `dist/`
@@ -78,8 +80,8 @@ Use `python` on Windows. The destination must not already exist; pass
 platform and includes its Rust target in the archive filename.
 
 Packaging validates executable architectures, collects dependency license texts,
-embeds notices in `wrapper.jar`, and writes `SHA256SUMS`. Releases include runtime
-files, documentation, the example, MIT license, and third-party notices. Vendored
+and embeds notices in `wrapper.jar`. Releases include runtime files, the `wiki/`
+documentation, example source, MIT license, and third-party notices. Vendored
 license provenance is recorded in `licenses/sources.json`.
 
 Packaging uses Cargo's cached metadata and licenses; `cargo fetch --locked`

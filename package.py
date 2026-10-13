@@ -112,17 +112,14 @@ def main():
     (destination / "bin/service.sh").chmod(0o755)
     shutil.copy2(ROOT / "resources/AppCommand.bat.in", destination / "bin/service.bat")
     shutil.copy2(ROOT / "resources/wrapper.conf", destination / "conf/wrapper.conf")
-    for name in ("LICENSE", "README.md", "CONTRIBUTING.md"):
+    for name in ("LICENSE", "README.md"):
         shutil.copy2(ROOT / name, destination / name)
-    for name in ("docs", "examples"):
+    for name in ("wiki", "examples"):
         shutil.copytree(ROOT / name, destination / name,
                         ignore=shutil.ignore_patterns("build", "__pycache__"))
     (destination / "THIRD-PARTY-LICENSES.txt").write_text(license_text, encoding="utf-8")
     version = tomllib.loads((ROOT / "Cargo.toml").read_text())["package"]["version"]
     (destination / "VERSION").write_text(version + "\n")
-    (destination / "SHA256SUMS").write_text("".join(
-        f"{hashlib.sha256(file.read_bytes()).hexdigest()}  {file.relative_to(destination).as_posix()}\n"
-        for file in sorted(destination.rglob("*")) if file.is_file() and file.name != "SHA256SUMS"))
     if args.archive:
         args.archive.mkdir(parents=True, exist_ok=True)
         name = f"wrapper-{version}"
