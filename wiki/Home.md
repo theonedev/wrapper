@@ -18,6 +18,10 @@ application's JARs; integration consists of copying files and editing configurat
 
 ## Develop Wrapper
 
+Report bugs or request features through [issues](https://code.onedev.io/onedev/wrapper/~issues),
+and submit changes through [pull requests](https://code.onedev.io/onedev/wrapper/~pulls).
+Both are managed on **code.onedev.io**.
+
 - [Development guide](Development.md): install build tools, build, test, and publish releases.
 - [Contributing](Contributing.md): project layout, contribution checks, and wiki maintenance.
 

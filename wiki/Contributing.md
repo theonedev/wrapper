@@ -4,8 +4,13 @@
 
 Clone [the standalone repository](https://code.onedev.io/onedev/wrapper) and use
 the [build guide](Development.md) to install its pinned toolchain. No OneDev
-application checkout or private Maven repository is needed. Report reproducible
-problems and propose changes through the project's issue tracker and pull requests.
+application checkout or private Maven repository is needed.
+
+Create [issues](https://code.onedev.io/onedev/wrapper/~issues) for bugs and feature
+requests, and [pull requests](https://code.onedev.io/onedev/wrapper/~pulls) for code
+or documentation changes in the Wrapper project on **code.onedev.io**.
+The GitHub repository is a mirror; development and reviews take place on OneDev.
+
 Include the Wrapper version, OS/architecture, Java version, and relevant redacted
 configuration and logs when reporting a bug.
 
