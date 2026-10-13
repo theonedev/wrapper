@@ -1,4 +1,4 @@
-# Service Wrapper
+# A Minimized Java Service Wrapper
 
 Run Java applications as native services on **macOS, Windows, and Linux**.
 
