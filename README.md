@@ -17,6 +17,13 @@ outside its scope.
 
 Requires Java 17+. Supports macOS arm64 and Windows/Linux amd64 and arm64.
 
+On systemd, `systemctl start` waits for the JVM bridge to connect and reports a
+failed start if the launcher cannot execute or the JVM fails before that point.
+This confirms JVM startup, not application readiness. Detailed errors are in
+`systemctl status` and `journalctl -u <service>`; the launcher's `start` command
+also prints captured startup errors. Existing systemd services must be removed
+and installed again to update their unit to `Type=notify`.
+
 [Download](https://code.onedev.io/onedev/wrapper/~sites/public/wrapper-latest.tar.gz) ·
 [Wiki](https://code.onedev.io/onedev/wrapper/~wiki) ·
 [MIT license](LICENSE)

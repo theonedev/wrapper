@@ -56,6 +56,20 @@ def manager():
             child = subprocess.Popen(launch, stdin=subprocess.DEVNULL, stdout=output, stderr=output,
                                      start_new_session=True, preexec_fn=demote)
         state.write_text(str(child.pid))
+        if platform.system() == "Linux" and "Type=notify\n" in registration.read_text():
+            # Model systemctl's blocking startup and failure return. The actual
+            # notification protocol is exercised separately in integration.py.
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                for report in (root / "bin").glob("*.startup"):
+                    lines = report.read_text().splitlines()
+                    if len(lines) >= 2 and lines[0].startswith(f"{child.pid}:") and lines[1] == "READY":
+                        return 0
+                if child.poll() is not None:
+                    print("Job failed; see journal for details", file=sys.stderr)
+                    return 1
+                time.sleep(0.05)
+            return 1
     elif command in ("stop", "kill", "bootout"):
         if alive(pid):
             os.kill(pid, signal.SIGTERM)

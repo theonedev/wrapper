@@ -134,6 +134,12 @@ pub fn render(options: &Options, config: &Config) -> Result<String> {
         result.push_str("<key>EnvironmentVariables</key><dict><key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string></dict>\n</dict></plist>\n");
         Ok(result)
     } else {
+        let start_timeout = config.number("wrapper.startup.wait.timeout", 120)?;
+        let start_timeout = if start_timeout == 0 {
+            "infinity".into()
+        } else {
+            start_timeout.to_string()
+        };
         let timeout = config.number("wrapper.shutdown.timeout", 30)?;
         let timeout = if timeout == 0 {
             "infinity".into()
@@ -141,12 +147,13 @@ pub fn render(options: &Options, config: &Config) -> Result<String> {
             (timeout + 10).to_string()
         };
         let mut result = format!(
-            "[Unit]\nDescription={}\nAfter=network.target\n\n[Service]\nType=simple\nExecStart={}\nKillMode=mixed\nTimeoutStopSec={}\nRestart=no\n",
+            "[Unit]\nDescription={}\nAfter=network.target\n\n[Service]\nType=notify\nNotifyAccess=main\nExecStart={}\nKillMode=mixed\nTimeoutStartSec={}\nTimeoutStopSec={}\nRestart=no\n",
             unit_value(config.get("wrapper.description", config.name()))?,
             args.iter()
                 .map(|arg| unit_arg(arg))
                 .collect::<Result<Vec<_>>>()?
                 .join(" "),
+            start_timeout,
             timeout
         );
         if !config.user().is_empty() {
@@ -425,9 +432,16 @@ fn start_native(options: &Options, config: &Config) -> Result<()> {
                 )?;
             }
         } else {
-            checked(
+            let result = checked(
                 Command::new("systemctl").args(["start", &format!("{}.service", config.name())]),
-            )?;
+            );
+            if result.is_err() {
+                // Type=notify makes systemctl fail before we reach the wait loop.
+                // Prefer the new startup report's detailed JVM error when available;
+                // pre-exec failures have no report and retain systemctl's diagnostic.
+                startup.poll()?;
+            }
+            result?;
         }
     }
     super::wait_startup(timeout, || startup.poll())

@@ -5,6 +5,8 @@ mod logging;
 mod service;
 mod startup;
 mod supervisor;
+#[cfg(target_os = "linux")]
+mod systemd;
 
 use anyhow::{Context, Result, bail, ensure};
 use config::Config;
@@ -176,7 +178,13 @@ fn run_args(args: Vec<String>) -> Result<i32> {
     let options = Options::parse(args)?;
     let config = options.load()?;
     match options.command.as_str() {
-        "console" | "daemon" => supervisor::run(&options, |_| Ok(()), None),
+        "console" | "daemon" => {
+            #[cfg(target_os = "linux")]
+            if options.internal && options.command == "console" {
+                return systemd::run(&options);
+            }
+            supervisor::run(&options, |_| Ok(()), None)
+        }
         #[cfg(unix)]
         "startup-path" => {
             service::switch_user(&config)?;

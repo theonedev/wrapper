@@ -236,6 +236,58 @@ wrapper.restart.delay=0
                 self.assertNotIn(f"Launching {missing}", result.stdout)
                 self.assertEqual(log.read_text().count(f"Launching {missing}"), 1)
 
+    @unittest.skipUnless(platform.system() == "Linux", "systemd notification protocol")
+    def test_systemd_waits_for_jvm_bridge_and_reports_shutdown(self):
+        launcher = self.root / "bin/service.sh"
+        shutil.copy2(PROJECT / "resources/App.sh.in", launcher)
+        launcher.chmod(0o755)
+        slow_java = self.root / "boot/slow-java"
+        slow_java.write_text(f'#!/bin/sh\nsleep 0.5\nexec {shlex.quote(shutil.which("java"))} "$@"\n')
+        slow_java.chmod(0o755)
+        for abstract in (False, True):
+            with self.subTest(abstract=abstract), socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as receiver:
+                address = f'\0wrapper-notify-{os.getpid()}' if abstract else str(self.root / "notify")
+                receiver.bind(address)
+                receiver.settimeout(10)
+                environment = dict(os.environ, NOTIFY_SOCKET="@" + address[1:] if abstract else address)
+                started = time.monotonic()
+                process = subprocess.Popen(
+                    [str(launcher), "--service", "console", str(self.config),
+                     f"wrapper.java.command={slow_java}"], env=environment,
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                self.processes.append(process)
+                self.assertEqual(receiver.recv(4096), b"STATUS=Starting JVM")
+                self.assertIn(b"READY=1", receiver.recv(4096))
+                self.assertGreaterEqual(time.monotonic() - started, 1)
+                self.assertIsNone(process.poll())
+                process.terminate()
+                self.assertIn(b"STOPPING=1", receiver.recv(4096))
+                output, _ = process.communicate(timeout=10)
+                self.assertEqual(process.returncode, 0, output)
+
+    @unittest.skipUnless(platform.system() == "Linux", "systemd notification protocol")
+    def test_systemd_never_reports_ready_when_java_cannot_start(self):
+        launcher = self.root / "bin/service.sh"
+        shutil.copy2(PROJECT / "resources/App.sh.in", launcher)
+        launcher.chmod(0o755)
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as receiver:
+            address = str(self.root / "notify")
+            receiver.bind(address)
+            receiver.settimeout(0.1)
+            for setting, diagnostic in (
+                (f"wrapper.java.command={self.root}/missing-java", "missing-java"),
+                ("wrapper.java.additional.1=-Xmxinvalid-fixture-size", "invalid-fixture-size"),
+            ):
+                with self.subTest(setting=setting):
+                    result = subprocess.run(
+                        [str(launcher), "--service", "console", str(self.config), setting],
+                        env=dict(os.environ, NOTIFY_SOCKET=address), capture_output=True, text=True, timeout=10)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(diagnostic, result.stdout + result.stderr)
+                    self.assertEqual(receiver.recv(4096), b"STATUS=Starting JVM")
+                    with self.assertRaises(socket.timeout):
+                        receiver.recv(4096)
+
     @unittest.skipIf(os.name == "nt", "Unix service launch environment")
     def test_service_java_probe_failure_preserves_diagnostics(self):
         # Model macOS's java shim: executable exists, but no runtime is available
