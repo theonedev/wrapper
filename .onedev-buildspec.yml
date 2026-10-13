@@ -5,7 +5,8 @@ jobs:
   - type: CheckoutStep
     name: checkout
     cloneCredential:
-      type: DefaultCredential
+      type: HttpCredential
+      accessTokenSecret: onedev-token
     withLfs: false
     withSubmodules: false
     condition: SUCCESSFUL
@@ -22,6 +23,11 @@ jobs:
     useTTY: false
     condition: SUCCESSFUL
     optional: false
+  - type: SetBuildVersionStep
+    name: set version
+    buildVersion: '@file:dist/release/wrapper/VERSION@'
+    condition: SUCCESSFUL
+    optional: false
   - type: PublishArtifactStep
     name: publish versioned package
     sourcePath: dist/artifacts
@@ -34,9 +40,116 @@ jobs:
     siteFiles: wrapper-latest.tar.gz wrapper-latest.tar.gz.sha256
     condition: SUCCESSFUL
     optional: false
+  - type: CommandStep
+    name: publish GitHub release
+    runInContainer: true
+    image: 1dev/buildenv
+    interpreter:
+      type: PosixInterpreter
+      shell: bash
+      commands: |
+        set -euo pipefail
+
+        buildVersion='@build_version@'
+        tag="v$buildVersion"
+        apiUrl=https://api.github.com/repos/theonedev/wrapper
+
+        # Only a missing release should trigger creation; authentication/API errors fail.
+        status=$(curl --silent --show-error --output github-release.json --write-out '%{http_code}' \
+          --header "Authorization: Bearer $GITHUB_TOKEN" \
+          --header "Accept: application/vnd.github+json" \
+          "$apiUrl/releases/tags/$tag")
+        case "$status" in
+          200)
+            releaseId=$(jq -er '.id' github-release.json)
+            method=PATCH
+            releaseUrl="$apiUrl/releases/$releaseId"
+            ;;
+          404)
+            method=POST
+            releaseUrl="$apiUrl/releases"
+            ;;
+          *)
+            echo "GitHub release lookup failed (HTTP $status)" >&2
+            cat github-release.json >&2
+            exit 1
+            ;;
+        esac
+
+        git config --global --add safe.directory "$PWD"
+        git -c user.name="Robin Shen" -c user.email="robin@@onedev.io" \
+          tag --force --annotate "$tag" --message "Release $buildVersion"
+        git push --force origin "refs/tags/$tag:refs/tags/$tag"
+        # Clear OneDev's checkout authorization header for requests to GitHub.
+        git -c http.extraHeader= push --force \
+          "https://robinshine:$GITHUB_TOKEN@@github.com/theonedev/wrapper.git" \
+          "refs/tags/$tag:refs/tags/$tag"
+
+        jq -n --arg version "$buildVersion" --arg tag "$tag" \
+          --arg downloads "https://code.onedev.io/onedev/wrapper/~builds/@build_number@/artifacts" \
+          --arg changes "https://code.onedev.io/onedev/wrapper/~builds/@build_number@/fixed-issues?query=%22State%22+is+%22Released%22+order+by+%22Type%22+asc+and+%22Priority%22+desc" \
+          '{name: $version, tag_name: $tag, body:
+            ("## Downloads\n\n" + $downloads +
+             "\n\n## Documentation\n\nhttps://code.onedev.io/onedev/wrapper/~wiki" +
+             "\n\n## Change Log\n\n" + $changes)}' > github-release-payload.json
+
+        curl --fail-with-body --silent --show-error --request "$method" \
+          --header "Authorization: Bearer $GITHUB_TOKEN" \
+          --header "Accept: application/vnd.github+json" \
+          --header "Content-Type: application/json" \
+          --data-binary @@github-release-payload.json "$releaseUrl"
+    runAs: 0:0
+    envVars:
+    - name: GITHUB_TOKEN
+      value: '@secret:github-token@'
+    useTTY: false
+    condition: SUCCESSFUL
+    optional: false
   retryCondition: never
   maxAttempts: 1
   retryDelay: 30
   includeUpstreamWhenRebuild: false
   includeDownstreamWhenRebuild: false
   timeout: 3600
+- name: Sync with GitHub
+  steps:
+  - type: CheckoutStep
+    name: checkout
+    cloneCredential:
+      type: DefaultCredential
+    withLfs: false
+    withSubmodules: false
+    condition: SUCCESSFUL
+    optional: false
+  - type: CommandStep
+    name: sync
+    runInContainer: true
+    image: alpine/git:1.0.7
+    interpreter:
+      type: PosixInterpreter
+      shell: sh
+      commands: |
+        set -eu
+        git config --global --add safe.directory "$PWD"
+        # Clear OneDev's checkout authorization header for requests to GitHub.
+        git -c http.extraHeader= push --force \
+          "https://robinshine:$GITHUB_TOKEN@@github.com/theonedev/wrapper.git" \
+          HEAD:refs/heads/main
+    runAs: 0:0
+    envVars:
+    - name: GITHUB_TOKEN
+      value: '@secret:github-token@'
+    useTTY: false
+    condition: SUCCESSFUL
+    optional: false
+  triggers:
+  - type: BranchUpdateTrigger
+    branches: main
+    userMatch: anyone
+    projects: onedev/wrapper
+  retryCondition: never
+  maxAttempts: 1
+  retryDelay: 30
+  includeUpstreamWhenRebuild: false
+  includeDownstreamWhenRebuild: false
+  timeout: 600

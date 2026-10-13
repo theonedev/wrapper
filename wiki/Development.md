@@ -98,8 +98,9 @@ builds all five targets, then publishes two outputs:
 | Build artifacts (`PublishArtifactStep`) | `wrapper-VERSION.tar.gz` and `wrapper-VERSION.tar.gz.sha256` from `dist/artifacts/` | Versioned downloads attached to the build |
 | Public site (`PublishSiteStep`) | `wrapper-latest.tar.gz` and `wrapper-latest.tar.gz.sha256` from `dist/site/` | Stable links for application integration |
 
-The version comes from `Cargo.toml`. Each latest archive is an identical copy of
-the versioned artifact and keeps its `wrapper-VERSION/` top-level directory.
+The version comes from `Cargo.toml` and is also used as the OneDev build version.
+Each latest archive is an identical copy of the versioned artifact and keeps its
+`wrapper-VERSION/` top-level directory.
 Its checksum file names `wrapper-latest.tar.gz` so checksum verification works
 with the downloaded filename. The public site is updated after versioned artifacts
 are published successfully.
@@ -112,6 +113,25 @@ package from the Artifacts tab.
 The build image must already contain the toolchain and macOS SDK; initial Windows
 SDK/CRT downloads require network access. Running `package.py` locally creates
 the versioned output; `ci/release.sh` also prepares the stable site files.
+
+The **Sync with GitHub** job mirrors OneDev's `main` branch to
+[theonedev/wrapper](https://github.com/theonedev/wrapper) on each update. OneDev is
+the source repository; the sync force-updates GitHub's `main` to match.
+
+After publishing the packages, **Release** tags the build commit as `vVERSION`
+in both repositories and creates or updates the corresponding GitHub release.
+Release notes link to that OneDev build's versioned downloads, change log, and
+the project wiki; package files remain hosted on OneDev. Rerunning the
+same version refreshes its tag and release. Change `Cargo.toml` for a new version.
+
+The jobs use these secrets:
+
+- `onedev-token`: a OneDev token allowed to push release tags to `onedev/wrapper`.
+- `github-token`: a GitHub token for `robinshine` with write access to repository
+  contents (branches, tags, and releases) in `theonedev/wrapper`.
+
+Configure these as project or inherited job secrets authorized for these jobs.
+The release container also needs Git, curl, and jq.
 
 ## Verification
 

@@ -35,13 +35,17 @@ my-app/
 ```
 
 For an existing distribution, preserve your application's directories and files;
-merge the following files into a staging copy. Replace the paths in these commands.
+merge the following files into a staging copy. Set the three directory paths at
+the start of the block for your platform. The JAR source directory should contain
+your application's JARs and runtime dependency JARs.
 
 On macOS/Linux, using Bash:
 
 ```sh
-wrapper_release=/path/to/extracted-wrapper
-application_dir=/path/to/my-app
+wrapper_release='/path/to/extracted-wrapper'
+application_dir='/path/to/my-app'
+application_jars_dir='/path/to/application-jars'
+
 mkdir -p "$application_dir/bin" "$application_dir/boot" "$application_dir/conf" \
   "$application_dir/lib" "$application_dir/licenses/wrapper"
 cp -R "$wrapper_release/boot/." "$application_dir/boot/"
@@ -49,7 +53,7 @@ cp "$wrapper_release/bin/service.sh" "$wrapper_release/bin/service.bat" "$applic
 cp "$wrapper_release/conf/wrapper.conf" "$application_dir/conf/"
 cp "$wrapper_release/LICENSE" "$wrapper_release/THIRD-PARTY-LICENSES.txt" \
   "$wrapper_release/VERSION" "$application_dir/licenses/wrapper/"
-cp /path/to/my-app.jar "$application_dir/lib/"
+cp "$application_jars_dir"/*.jar "$application_dir/lib/"
 chmod +x "$application_dir/bin/service.sh" "$application_dir"/boot/wrapper-*
 ```
 
@@ -58,15 +62,18 @@ On Windows, using PowerShell:
 ```powershell
 $wrapperRelease = 'C:\downloads\wrapper'
 $applicationDir = 'C:\services\my-app'
+$applicationJarsDir = 'C:\build\application-jars'
+
 New-Item -ItemType Directory -Force -Path "$applicationDir\bin", "$applicationDir\boot", "$applicationDir\conf", "$applicationDir\lib", "$applicationDir\licenses\wrapper" | Out-Null
 Copy-Item "$wrapperRelease\boot\*" "$applicationDir\boot\"
 Copy-Item "$wrapperRelease\bin\service.sh", "$wrapperRelease\bin\service.bat" "$applicationDir\bin\"
 Copy-Item "$wrapperRelease\conf\wrapper.conf" "$applicationDir\conf\"
 Copy-Item "$wrapperRelease\LICENSE", "$wrapperRelease\THIRD-PARTY-LICENSES.txt", "$wrapperRelease\VERSION" "$applicationDir\licenses\wrapper\"
-Copy-Item 'C:\build\my-app.jar' "$applicationDir\lib\"
+Copy-Item "$applicationJarsDir\*.jar" "$applicationDir\lib\"
 ```
 
-Copy additional runtime dependencies as well, preserving any layout your app
+These commands copy all JARs directly inside the source directory. Copy nested
+dependencies and other resources separately, preserving any layout your app
 requires. Keep `boot/`, `bin/`, and `conf/` as siblings; your application JARs may
 live elsewhere if you adjust the classpath. Keep only the native executables for
 your target platforms, or retain all of them. Always use `wrapper.jar` and native
