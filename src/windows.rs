@@ -6,7 +6,10 @@ use crate::{
 use anyhow::{Context, Result, bail, ensure};
 use std::{
     ffi::OsString,
-    os::windows::{ffi::OsStrExt, io::AsRawHandle},
+    os::windows::{
+        ffi::OsStrExt,
+        io::{AsRawHandle, FromRawHandle, OwnedHandle},
+    },
     path::Path,
     process::Child,
     sync::{
@@ -28,15 +31,28 @@ use windows_service::{
     service_manager::{ServiceManager, ServiceManagerAccess},
 };
 use windows_sys::Win32::{
-    Foundation::{CloseHandle, HANDLE, LocalFree},
+    Foundation::{
+        CloseHandle, ERROR_ACCESS_DENIED, ERROR_CANCELLED, HANDLE, LocalFree, WAIT_OBJECT_0,
+        WAIT_TIMEOUT,
+    },
     Security::{
         Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW,
         DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, SetFileSecurityW,
     },
-    System::JobObjects::{
-        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
-        SetInformationJobObject, TerminateJobObject,
+    System::{
+        JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+            SetInformationJobObject, TerminateJobObject,
+        },
+        Threading::{GetExitCodeProcess, WaitForSingleObject},
+    },
+    UI::{
+        Shell::{
+            IsUserAnAdmin, SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW,
+            ShellExecuteExW,
+        },
+        WindowsAndMessaging::SW_SHOWNORMAL,
     },
 };
 
@@ -128,7 +144,13 @@ fn status(state: ServiceState, checkpoint: u32, code: u32) -> ServiceStatus {
         } else {
             ServiceControlAccept::empty()
         },
-        exit_code: ServiceExitCode::Win32(code),
+        // JVM/application exit codes are not Win32 error numbers (1 means
+        // "Incorrect function" to Windows, which hides the real startup failure).
+        exit_code: if code == 0 {
+            ServiceExitCode::Win32(0)
+        } else {
+            ServiceExitCode::ServiceSpecific(code)
+        },
         checkpoint,
         wait_hint: if matches!(
             state,
@@ -262,9 +284,8 @@ fn manager(create: bool) -> Result<ServiceManager> {
         } else {
             ServiceManagerAccess::empty()
         };
-    ServiceManager::local_computer(None::<&str>, access).context(
-        "Opening Windows Service Control Manager (use an elevated prompt for install/remove)",
-    )
+    ServiceManager::local_computer(None::<&str>, access)
+        .context("Opening Windows Service Control Manager")
 }
 fn open(config: &Config, access: ServiceAccess) -> Result<Service> {
     Ok(manager(false)?.open_service(config.name(), access)?)
@@ -379,14 +400,187 @@ fn stop(config: &Config) -> Result<i32> {
         supervisor::stop(config, false)
     }
 }
+// Quote for Windows argv parsing, not cmd.exe: no shell interprets these arguments.
+fn quote_argument(value: &str) -> String {
+    let mut quoted = String::from("\"");
+    let mut slashes = 0;
+    for ch in value.chars() {
+        if ch == '\\' {
+            slashes += 1;
+        } else {
+            quoted.push_str(&"\\".repeat(if ch == '"' { slashes * 2 + 1 } else { slashes }));
+            quoted.push(ch);
+            slashes = 0;
+        }
+    }
+    quoted.push_str(&"\\".repeat(slashes * 2));
+    quoted.push('"');
+    quoted
+}
+
+fn elevate(options: &Options) -> Result<i32> {
+    let mut report = crate::startup::SocketWait::new()?;
+    let [port, token] = report.arguments()?;
+    let executable: Vec<u16> = std::env::current_exe()?
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    let directory: Vec<u16> = std::env::current_dir()?
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    // Keep overrides (including installation credentials) and application arguments.
+    let mut arguments = vec!["--elevated-result".to_owned(), port, token];
+    arguments.extend(options.child_args(&options.command));
+    let parameters: Vec<u16> = arguments
+        .iter()
+        .map(|arg| quote_argument(arg))
+        .collect::<Vec<_>>()
+        .join(" ")
+        .encode_utf16()
+        .chain(Some(0))
+        .collect();
+    let verb: Vec<u16> = "runas\0".encode_utf16().collect();
+    println!(
+        "Requesting administrator permission to {} service...",
+        options.command
+    );
+    unsafe {
+        let mut info: SHELLEXECUTEINFOW = std::mem::zeroed();
+        info.cbSize = std::mem::size_of_val(&info) as u32;
+        info.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC;
+        info.lpVerb = verb.as_ptr();
+        info.lpFile = executable.as_ptr();
+        info.lpParameters = parameters.as_ptr();
+        info.lpDirectory = directory.as_ptr();
+        info.nShow = SW_SHOWNORMAL;
+        if ShellExecuteExW(&mut info) == 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(ERROR_CANCELLED as i32) {
+                bail!("Administrator permission was cancelled");
+            }
+            return Err(error).context("Requesting administrator permission");
+        }
+        ensure!(!info.hProcess.is_null(), "Elevated process handle missing");
+        let process = OwnedHandle::from_raw_handle(info.hProcess);
+        let diagnostic = wait_elevated(&process, &mut report)?;
+        let mut code = 0;
+        ensure!(
+            GetExitCodeProcess(process.as_raw_handle(), &mut code) != 0,
+            "Reading elevated command result: {}",
+            std::io::Error::last_os_error()
+        );
+        if code == 0 {
+            println!("Elevated {} completed", options.command);
+        } else if let Some(Err(error)) = diagnostic {
+            eprintln!("Wrapper: {error:#}");
+        } else {
+            eprintln!("Elevated {} failed with exit code {code}", options.command);
+        }
+        Ok(code as i32)
+    }
+}
+
+// Drain diagnostics while waiting so even a full report cannot block the child.
+// The process handle remains authoritative for the command's exit status.
+fn wait_elevated(
+    process: &OwnedHandle,
+    report: &mut crate::startup::SocketWait,
+) -> Result<Option<Result<()>>> {
+    let mut diagnostic = None;
+    let mut exited = None;
+    loop {
+        if diagnostic.is_none() {
+            diagnostic = match report.poll_command() {
+                Ok(true) => Some(Ok(())),
+                Ok(false) => None,
+                Err(error) => Some(Err(error)),
+            };
+        }
+        if let Some(exited) = exited {
+            // Allow buffered TCP data to arrive after process exit, but retain
+            // a fallback for a child that crashes before reporting anything.
+            if diagnostic.is_some() || Instant::now() >= exited {
+                return Ok(diagnostic);
+            }
+            thread::sleep(Duration::from_millis(25));
+        } else {
+            match unsafe { WaitForSingleObject(process.as_raw_handle(), 25) } {
+                WAIT_OBJECT_0 => exited = Some(Instant::now() + Duration::from_secs(2)),
+                WAIT_TIMEOUT => (),
+                _ => {
+                    return Err(std::io::Error::last_os_error())
+                        .context("Waiting for elevated command");
+                }
+            }
+        }
+    }
+}
+
+// This entry point is invoked by ShellExecuteEx after UAC consent. Its one-time
+// authenticated channel reports errors even when logging is disabled or broken.
+pub fn run_elevated(arguments: &[String]) -> Result<i32> {
+    ensure!(
+        arguments.len() >= 3,
+        "Missing elevated command result arguments"
+    );
+    let report = crate::startup::Capture::connect(arguments[0].parse()?, &arguments[1])?;
+    let result = crate::run_args(arguments[2..].to_vec());
+    match result {
+        Ok(0) => {
+            report.ready()?;
+            Ok(0)
+        }
+        Ok(code) => {
+            report.record(format!("Elevated command failed with exit code {code}").as_bytes());
+            report.finish()?;
+            Ok(code)
+        }
+        Err(error) => {
+            report.record(format!("{error:#}").as_bytes());
+            report.finish()?;
+            Ok(1)
+        }
+    }
+}
+
+fn should_elevate(command: &str, error: &anyhow::Error, administrator: bool) -> bool {
+    !administrator
+        && matches!(command, "start" | "stop" | "restart" | "condrestart")
+        && error.chain().any(|cause| {
+            cause
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32))
+        })
+}
+
 pub fn manage(options: &Options, config: &Config) -> Result<i32> {
+    if matches!(
+        options.command.as_str(),
+        "install" | "installstart" | "remove"
+    ) && unsafe { IsUserAnAdmin() } == 0
+    {
+        return elevate(options);
+    }
+    let result = manage_command(options, config);
+    if let Err(error) = &result
+        && should_elevate(&options.command, error, unsafe { IsUserAnAdmin() } != 0)
+    {
+        return elevate(options);
+    }
+    result
+}
+
+fn manage_command(options: &Options, config: &Config) -> Result<i32> {
     match options.command.as_str() {
         "install" => install(options, config),
         "installstart" => {
             install(options, config)?;
             let mut start = options.clone();
             start.command = "start".into();
-            manage(&start, config)
+            manage_command(&start, config)
         }
         "remove" => {
             println!("Removing service...");
@@ -438,18 +632,24 @@ pub fn manage(options: &Options, config: &Config) -> Result<i32> {
         }
         "stop" => stop(config),
         "restart" | "condrestart" => {
-            if options.command == "condrestart"
-                && optional(config, ServiceAccess::QUERY_STATUS)?.is_none_or(|s| {
-                    s.query_status()
-                        .is_ok_and(|v| v.current_state == ServiceState::Stopped)
-                })
-            {
-                return Ok(0);
+            if options.command == "condrestart" {
+                let Some(service) = optional(config, ServiceAccess::QUERY_STATUS)? else {
+                    return Ok(0);
+                };
+                if service.query_status()?.current_state == ServiceState::Stopped {
+                    return Ok(0);
+                }
             }
+            // Check both rights before stopping: a denied start must not leave a
+            // service stopped before UAC approval, especially for condrestart.
+            let _service = optional(
+                config,
+                ServiceAccess::START | ServiceAccess::STOP | ServiceAccess::QUERY_STATUS,
+            )?;
             stop(config)?;
             let mut start = options.clone();
             start.command = "start".into();
-            manage(&start, config)
+            manage_command(&start, config)
         }
         "status" => {
             if let Some(service) = optional(config, ServiceAccess::QUERY_STATUS)? {
@@ -469,4 +669,127 @@ pub fn manage(options: &Options, config: &Config) -> Result<i32> {
 }
 pub fn render(_: &Options, _: &Config) -> Result<String> {
     bail!("Windows services are registered with SCM; use install")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows_sys::Win32::UI::Shell::CommandLineToArgvW;
+
+    #[test]
+    fn elevated_command_reports_missing_java_without_log_files() {
+        let mut receiver = crate::startup::SocketWait::new().unwrap();
+        let [port, token] = receiver.arguments().unwrap();
+        let path =
+            std::env::temp_dir().join(format!("wrapper-uac-check-{}.conf", std::process::id()));
+        std::fs::write(
+            &path,
+            "wrapper.java.command=missing-java-for-uac-check.exe\nwrapper.logfile.loglevel=NONE\n",
+        )
+        .unwrap();
+        let result = run_elevated(&[
+            port,
+            token,
+            "check".into(),
+            path.to_string_lossy().into_owned(),
+        ]);
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(result.unwrap(), 1);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            match receiver.poll_command() {
+                Err(error) => {
+                    let message = format!("{error:#}");
+                    assert!(
+                        message.contains("Launching missing-java-for-uac-check.exe"),
+                        "{message}"
+                    );
+                    assert!(message.contains("Starting JVM"), "{message}");
+                    break;
+                }
+                Ok(ready) => assert!(!ready),
+            }
+            assert!(
+                Instant::now() < deadline,
+                "Missing elevated command diagnostic"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn application_failure_is_not_a_win32_error() {
+        assert_eq!(
+            status(ServiceState::Stopped, 0, 1).exit_code,
+            ServiceExitCode::ServiceSpecific(1)
+        );
+        assert_eq!(
+            status(ServiceState::Stopped, 0, 0).exit_code,
+            ServiceExitCode::Win32(0)
+        );
+    }
+
+    #[test]
+    fn elevation_requires_access_denied_on_a_management_command() {
+        let error = anyhow::Error::new(windows_service::Error::Winapi(
+            std::io::Error::from_raw_os_error(ERROR_ACCESS_DENIED as i32),
+        ))
+        .context("Opening service");
+        for command in ["start", "stop", "restart", "condrestart"] {
+            assert!(should_elevate(command, &error, false));
+            assert!(!should_elevate(command, &error, true));
+        }
+        for command in ["console", "status", "check", "service", "unknown"] {
+            assert!(!should_elevate(command, &error, false));
+        }
+        let missing_service = anyhow::Error::new(windows_service::Error::Winapi(
+            std::io::Error::from_raw_os_error(1060),
+        ));
+        assert!(!should_elevate("start", &missing_service, false));
+        assert!(!should_elevate(
+            "start",
+            &anyhow::anyhow!("Access is denied"),
+            false
+        ));
+    }
+
+    #[test]
+    fn elevated_arguments_round_trip() {
+        let arguments = [
+            "wrapper.exe",
+            "install",
+            r"C:\Program Files\OneDev\conf\wrapper.conf",
+            "",
+            r"C:\trailing path\",
+            r#"quoted \"value\""#,
+            "wrapper.ntservice.password=a&b%PATH%!",
+            "--",
+            "Unicode \u{670d}\u{52a1}",
+        ];
+        let command: Vec<u16> = arguments
+            .iter()
+            .map(|arg| quote_argument(arg))
+            .collect::<Vec<_>>()
+            .join(" ")
+            .encode_utf16()
+            .chain(Some(0))
+            .collect();
+        unsafe {
+            let mut count = 0;
+            let argv = CommandLineToArgvW(command.as_ptr(), &mut count);
+            assert!(!argv.is_null());
+            let decoded: Vec<String> = std::slice::from_raw_parts(argv, count as usize)
+                .iter()
+                .map(|arg| {
+                    let mut length = 0;
+                    while *arg.add(length) != 0 {
+                        length += 1;
+                    }
+                    String::from_utf16_lossy(std::slice::from_raw_parts(*arg, length))
+                })
+                .collect();
+            LocalFree(argv as _);
+            assert_eq!(decoded, arguments);
+        }
+    }
 }

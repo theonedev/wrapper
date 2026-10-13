@@ -152,12 +152,13 @@ fn message(bytes: &[u8]) -> Result<Option<Message<'_>>> {
     }))
 }
 
-fn result(message: &Message<'_>) -> Result<bool> {
+fn result(message: &Message<'_>, failure_prefix: &str) -> Result<bool> {
     match message.state {
         "READY" => Ok(true),
         "STARTING" => Ok(false),
         "FAILED" => bail!(
-            "Service failed to start:\n{}",
+            "{}{}",
+            failure_prefix,
             String::from_utf8_lossy(message.output).trim_end()
         ),
         state => bail!("Invalid startup state: {state}"),
@@ -231,7 +232,7 @@ impl FileWait {
                 .pid
                 .is_none_or(|pid| message.id.starts_with(&format!("{pid}:")))
         {
-            return result(&message);
+            return result(&message, "Service failed to start:\n");
         }
         Ok(false)
     }
@@ -274,6 +275,16 @@ impl SocketWait {
     }
 
     pub fn poll(&mut self) -> Result<bool> {
+        self.poll_result("Service failed to start:\n")
+    }
+
+    // The elevated command already adds context to its error chain.
+    #[cfg(windows)]
+    pub fn poll_command(&mut self) -> Result<bool> {
+        self.poll_result("")
+    }
+
+    fn poll_result(&mut self, failure_prefix: &str) -> Result<bool> {
         use std::{
             io::Read,
             time::{Duration, Instant},
@@ -328,7 +339,7 @@ impl SocketWait {
                     break;
                 }
                 *authenticated = true;
-                if result(&message)? {
+                if result(&message, failure_prefix)? {
                     return Ok(true);
                 }
                 let length = message.length;

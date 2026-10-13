@@ -156,6 +156,14 @@ impl Options {
 
 fn run() -> Result<i32> {
     let args: Vec<String> = env::args().skip(1).collect();
+    #[cfg(windows)]
+    if args.first().is_some_and(|arg| arg == "--elevated-result") {
+        return service::run_elevated(&args[1..]);
+    }
+    run_args(args)
+}
+
+fn run_args(args: Vec<String>) -> Result<i32> {
     if args == ["--version"] {
         println!("Wrapper {}", env!("CARGO_PKG_VERSION"));
         return Ok(0);

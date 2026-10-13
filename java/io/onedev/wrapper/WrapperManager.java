@@ -32,7 +32,8 @@ public final class WrapperManager {
 
     private static void send(Socket socket, String command) throws Exception {
         PrintWriter writer = new PrintWriter(new OutputStreamWriter(socket.getOutputStream(), StandardCharsets.UTF_8), true);
-        writer.println(System.getenv("WRAPPER_TOKEN") + " " + command);
+        // The control protocol uses LF on every platform, including Windows.
+        writer.print(System.getenv("WRAPPER_TOKEN") + " " + command + "\n");
         if (writer.checkError())
             throw new IllegalStateException("Unable to contact Wrapper");
     }

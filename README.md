@@ -87,7 +87,15 @@ stop the wrapper when the JVM exits, unless the JVM explicitly requests a restar
 
 Service registration uses Windows SCM, Linux systemd (or SysV when systemd is not
 running), and macOS launchd. Installation/removal require administrator/root access;
-ordinary console and detached Unix operation do not. Unix `start` without service
+ordinary console and detached Unix operation do not. On Windows, `install`,
+`installstart`, and `remove` request permission through UAC when run without
+administrator privileges, then wait for the elevated command and return its exit
+code. `start`, `stop`, `restart`, and `condrestart` also request UAC permission if
+Windows denies access, while operations already permitted to the caller run
+without a prompt. `console` and `status` never request elevation. Cancelling a
+prompt returns an error. Elevated command failures, including JVM startup
+diagnostics, are returned to the original terminal even when file logging is
+disabled. Unix `start` without service
 registration starts a detached supervisor. Windows `start` requires installation.
 On macOS, `start`, `stop`, `restart`, and `condrestart` for an installed system
 service also require root; run these commands with `sudo`. This applies even if
@@ -232,6 +240,24 @@ Rerunning the installer reuses the saved tool paths and preserves cross-compiler
 installed by an earlier `--all` run, even when `--all` is omitted on a later run.
 Use `./install.sh --all` to also install cross-compilation tools and all five Rust
 targets. On Linux, the macOS SDK must still be supplied separately via `SDKROOT`.
+
+On Windows amd64 or arm64, run from Command Prompt or PowerShell:
+
+```bat
+.\install.bat
+.\build.bat
+```
+
+The Windows installer uses WinGet (App Installer) for missing JDK 17+, Python
+3.11+, Rustup, and Visual Studio 2022 C++ Build Tools with the Windows SDK.
+Run it as your normal user; system installers request elevation when needed.
+It installs the pinned Rust toolchain and the host's Windows target. Use
+`.\install.bat --all` to install both Windows targets and the ARM64 MSVC tools,
+then `.\build.bat x86_64-pc-windows-msvc aarch64-pc-windows-msvc` to build both.
+The batch build supports Windows targets; use `build.sh` for Linux and macOS.
+It writes the Java bridge and static-runtime executables to `dist\boot`.
+Run `.\build.bat clean` to remove Rust artifacts (honoring `CARGO_TARGET_DIR`),
+`build`, and `dist`.
 
 Use Rust 1.96.1, JDK 17+, and Python 3.11+. `Cargo.lock` fixes dependency versions.
 For cross-compilation install Zig 0.16.0, `cargo-zigbuild` 0.23.4, and `cargo-xwin`
