@@ -1,9 +1,9 @@
-package org.servicewrapper;
+package io.onedev.wrapper;
 
 import java.lang.reflect.InvocationTargetException;
 import java.util.Arrays;
 
-/** Launch a Java main class through the ServiceWrapper lifecycle bridge. */
+/** Launch a Java main class through the Wrapper lifecycle bridge. */
 public final class WrapperSimpleApp {
     private WrapperSimpleApp() {
     }

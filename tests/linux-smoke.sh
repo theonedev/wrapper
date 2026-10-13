@@ -2,14 +2,14 @@
 # Run with JDK 17+ in a disposable Linux container. The fixture is compiled locally.
 set -euo pipefail
 PROJECT=$(cd "$(dirname "$0")/.." && pwd)
-TEST_ROOT=$(mktemp -d '/tmp/ServiceWrapper Linux smoke.XXXXXX')
+TEST_ROOT=$(mktemp -d '/tmp/Wrapper Linux smoke.XXXXXX')
 mkdir -p "$TEST_ROOT"/{bin,boot,conf,logs}
 cp "$PROJECT"/dist/boot/* "$TEST_ROOT/boot/"
 cp "$PROJECT/resources/App.sh.in" "$TEST_ROOT/bin/service.sh"
 chmod +x "$TEST_ROOT/bin/service.sh"
 javac --release 17 -cp "$TEST_ROOT/boot/wrapper.jar" -d "$TEST_ROOT/boot" "$PROJECT/tests/Fixture.java"
 cat > "$TEST_ROOT/conf/wrapper.conf" <<EOF
-wrapper.name=servicewrapper-linux-test
+wrapper.name=wrapper-linux-test
 wrapper.java.command=$(command -v java)
 wrapper.java.classpath.1=.
 wrapper.app.parameter.1=Fixture

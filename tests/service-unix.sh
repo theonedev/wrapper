@@ -3,8 +3,8 @@
 set -euo pipefail
 [ "$(id -u)" = 0 ] || { echo 'Run as root on a disposable service test host.' >&2; exit 1; }
 PROJECT=$(cd "$(dirname "$0")/.." && pwd)
-TEST_ROOT=$(mktemp -d '/tmp/ServiceWrapper service test.XXXXXX')
-TEST_NAME=servicewrapper-test-$$
+TEST_ROOT=$(mktemp -d '/tmp/Wrapper service test.XXXXXX')
+TEST_NAME=wrapper-test-$$
 mkdir -p "$TEST_ROOT"/{bin,boot,conf,logs}
 cp "$PROJECT"/dist/boot/* "$TEST_ROOT/boot/"
 cp "$PROJECT/resources/App.sh.in" "$TEST_ROOT/bin/service.sh"

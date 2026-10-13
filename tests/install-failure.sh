@@ -4,7 +4,7 @@ set -euo pipefail
 [ "$(id -u)" = 0 ] || { echo 'Run as root on a disposable test host.' >&2; exit 1; }
 PROJECT=$(cd "$(dirname "$0")/.." && pwd)
 TEST_ROOT=$(mktemp -d)
-TEST_NAME=servicewrapper-install-failure-$$
+TEST_NAME=wrapper-install-failure-$$
 case "$(uname -m)" in
     x86_64) BINARY=wrapper-linux-x86-64 ;;
     aarch64) BINARY=wrapper-linux-arm-64 ;;

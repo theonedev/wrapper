@@ -1,4 +1,4 @@
-package org.servicewrapper;
+package io.onedev.wrapper;
 
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
@@ -11,7 +11,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-/** Optional lifecycle API for applications launched by ServiceWrapper. */
+/** Optional lifecycle API for applications launched by Wrapper. */
 public final class WrapperManager {
     private static final AtomicBoolean stopping = new AtomicBoolean();
 
@@ -19,7 +19,7 @@ public final class WrapperManager {
     }
 
     private static Socket connect() throws Exception {
-        int port = Integer.parseInt(System.getenv("SERVICEWRAPPER_PORT"));
+        int port = Integer.parseInt(System.getenv("WRAPPER_PORT"));
         Socket socket = new Socket();
         socket.connect(new InetSocketAddress(InetAddress.getByName("127.0.0.1"), port), 10000);
         socket.setSoTimeout(10000);
@@ -32,9 +32,9 @@ public final class WrapperManager {
 
     private static void send(Socket socket, String command) throws Exception {
         PrintWriter writer = new PrintWriter(new OutputStreamWriter(socket.getOutputStream(), StandardCharsets.UTF_8), true);
-        writer.println(System.getenv("SERVICEWRAPPER_TOKEN") + " " + command);
+        writer.println(System.getenv("WRAPPER_TOKEN") + " " + command);
         if (writer.checkError())
-            throw new IllegalStateException("Unable to contact ServiceWrapper");
+            throw new IllegalStateException("Unable to contact Wrapper");
     }
 
     static void initialize() throws Exception {
@@ -42,7 +42,7 @@ public final class WrapperManager {
         send(socket, "JVM");
         BufferedReader reader = reader(socket);
         if (!"OK".equals(reader.readLine()))
-            throw new IllegalStateException("ServiceWrapper rejected JVM connection");
+            throw new IllegalStateException("Wrapper rejected JVM connection");
         socket.setSoTimeout(0);
         // System.exit and the last non-daemon thread returning also run hooks.
         // Notify without requesting an exit code or changing the restart policy.
@@ -53,7 +53,7 @@ public final class WrapperManager {
             } catch (Exception ignored) {
                 // The supervisor may already be gone; do not prevent JVM exit.
             }
-        }, "ServiceWrapper shutdown notification"));
+        }, "Wrapper shutdown notification"));
         Thread control = new Thread(() -> {
             try (socket) {
                 String command;
@@ -66,7 +66,7 @@ public final class WrapperManager {
                 // Losing the supervisor must never leave an orphan JVM running.
             }
             supervisorLost();
-        }, "ServiceWrapper control");
+        }, "Wrapper control");
         control.setDaemon(true);
         control.start();
     }
@@ -74,7 +74,7 @@ public final class WrapperManager {
     private static void supervisorLost() {
         long timeout = 30;
         try {
-            long configured = Long.parseLong(System.getenv("SERVICEWRAPPER_SHUTDOWN_TIMEOUT"));
+            long configured = Long.parseLong(System.getenv("WRAPPER_SHUTDOWN_TIMEOUT"));
             if (configured > 0)
                 timeout = configured;
         } catch (RuntimeException ignored) {
@@ -89,7 +89,7 @@ public final class WrapperManager {
             } finally {
                 Runtime.getRuntime().halt(1);
             }
-        }, "ServiceWrapper parent-loss watchdog");
+        }, "Wrapper parent-loss watchdog");
         watchdog.setDaemon(true);
         watchdog.start();
         // Keep watching even when an earlier stop is already running hooks.
@@ -117,11 +117,11 @@ public final class WrapperManager {
                     send(socket, command);
                     reader(socket).readLine();
                 } catch (Exception e) {
-                    System.err.println("ServiceWrapper connection lost: " + e.getMessage());
+                    System.err.println("Wrapper connection lost: " + e.getMessage());
                 } finally {
                     System.exit(exitCode);
                 }
-            }, "ServiceWrapper shutdown").start();
+            }, "Wrapper shutdown").start();
         }
     }
 }

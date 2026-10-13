@@ -1,6 +1,19 @@
 #!/bin/bash
 set -euo pipefail
 cd "$(dirname "$0")"
+
+if [ "${1:-}" = clean ]; then
+    if [ "$#" -ne 1 ]; then
+        echo "Usage: $0 clean" >&2
+        exit 1
+    fi
+    echo "Cleaning build..."
+    cargo clean
+    rm -rf build dist
+    echo "Build cleaned"
+    exit 0
+fi
+
 rm -rf build/java
 mkdir -p build/java dist/boot
 find java -name "*.java" -print > build/java-sources.txt
@@ -37,5 +50,5 @@ for TARGET in "$@"; do
             esac ;;
         *) cargo build --locked --release --target "$TARGET" ;;
     esac
-    cp "${CARGO_TARGET_DIR:-target}/$TARGET/release/servicewrapper$EXTENSION" "dist/boot/$BINARY"
+    cp "${CARGO_TARGET_DIR:-target}/$TARGET/release/wrapper$EXTENSION" "dist/boot/$BINARY"
 done

@@ -1,18 +1,18 @@
-# ServiceWrapper
+# Wrapper
 
 A Rust service supervisor for Java applications, with Bash and Windows batch
 launchers. It installs and manages services on Windows, macOS, and Linux, launches
-Java directly, rotates output logs, and restarts failed JVMs. JVM options and
+Java directly, rotates output logs, and handles JVM-requested restarts. JVM options and
 service settings are configured in `conf/wrapper.conf`.
 
 This standalone project is maintained at
-[code.onedev.io/onedev/servicewrapper](https://code.onedev.io/onedev/servicewrapper).
+[code.onedev.io/onedev/wrapper](https://code.onedev.io/onedev/wrapper).
 It works with any Java application exposing a main method.
 
 ## Use with a Java application
 
-Download `servicewrapper-VERSION.tar.gz` from the
-[public download site](https://code.onedev.io/onedev/servicewrapper/~sites/public/),
+Download `wrapper-VERSION.tar.gz` from the
+[public download site](https://code.onedev.io/onedev/wrapper/~sites/public/),
 extract it, put your application jars in `lib`, and edit `conf/wrapper.conf`:
 
 ```properties
@@ -33,11 +33,12 @@ for example to `my-app.sh` and `my-app.bat`; the service name comes from the con
 Prefer `wrapper.app.parameter.N` for arguments that should also apply at boot.
 
 Applications that need to request their own restart or stop can compile against
-`boot/wrapper.jar` and call `org.servicewrapper.WrapperManager.restartAndReturn()`
-or `stopAndReturn(int)`. The equivalent `org.tanukisoftware.wrapper.WrapperManager`
-methods and `WrapperSimpleApp` main class remain available for JSW compatibility.
-The bridge is independently implemented and contains no Tanuki code or JNI library.
-See the compatibility limits below before migrating existing JSW integrations.
+`boot/wrapper.jar` and call `io.onedev.wrapper.WrapperManager.restartAndReturn()`
+or `stopAndReturn(int)`. The launcher class is
+`io.onedev.wrapper.WrapperSimpleApp`. The bridge requires no JNI library.
+Applications and wrapper configurations using an earlier Java API package must
+be updated together with `wrapper.jar` and the native executables.
+See the compatibility limits below before migrating existing integrations.
 
 ## Platforms
 
@@ -79,27 +80,37 @@ pass the same override to the wrapper binary's `dump` command. Dump requests
 locate the control file directly instead of querying the service manager.
 
 `installstart` installs and starts. `condrestart` restarts only a running instance.
-Application arguments preserve boundaries, spaces, and exit codes. Additional
-arguments do not disable service crash recovery. To create a one-shot command
-launcher, change its `--script` argument to `--command`: its filename is prepended
-to the application's arguments and crash retries are disabled. Direct invocation
-also accepts `wrapper.restart.disabled=TRUE` before `--` for one-shot invocations.
+Application arguments preserve boundaries, spaces, and exit codes. To create a utility
+command launcher, change its `--script` argument to `--command`: its filename is
+prepended to the application's arguments and file logging is disabled. All launchers
+stop the wrapper when the JVM exits, unless the JVM explicitly requests a restart.
 
 Service registration uses Windows SCM, Linux systemd (or SysV when systemd is not
 running), and macOS launchd. Installation/removal require administrator/root access;
 ordinary console and detached Unix operation do not. Unix `start` without service
 registration starts a detached supervisor. Windows `start` requires installation.
-Status returns 0 for an active instance and 3 when stopped/not installed.
-Unix `start` and `restart` wait for the JVM bridge to connect. Early failures,
-including a missing Java runtime, are printed to the caller's stderr with a
-nonzero exit code and written to the configured log when file logging is enabled.
-This checks the actual service process, including its account and environment;
-it does not imply that application initialization has finished. Services do not
-load a user's interactive shell setup, so SDKMAN and similar installations should
-use an absolute `wrapper.java.command`.
-Unix startup results are exchanged through private, service-user-owned files in
-`/tmp/servicewrapper-<uid>`, independently of installed PID/log path overrides.
-Each service replaces its result on startup; previous failures are not reused.
+On macOS, `start`, `stop`, `restart`, and `condrestart` for an installed system
+service also require root; run these commands with `sudo`. This applies even if
+the service runs under your own account. `status` does not require root.
+Status prints only the state, such as `RUNNING` or `STOPPED`, without a service-name
+prefix. It returns 0 for an active instance and 3 when stopped/not installed.
+Without service registration, `start` prints `Starting...` and then `Started`;
+`stop` prints `Stopping...` and then `Stopped`. Installed services retain
+`Starting service...` / `Service started` and `Stopping service...` / `Service stopped`.
+Startup waits for the JVM's wrapper handshake. Missing or unusable Java executables, Java
+version failures, and invalid JVM options are reported in the terminal as well
+as the configured log. This confirms JVM startup; application class loading and
+initialization happen afterward and their errors remain in the log.
+Services do not load a user's interactive shell setup, so SDKMAN and similar
+installations should use an absolute `wrapper.java.command`.
+`stop`, `install`, and `remove` also print a progress message and confirm successful
+completion. Unix `dump` prints
+`Thread dump requested, please check console log after a while` once the supervisor
+acknowledges the request; the JVM writes the dump asynchronously.
+The same behavior applies to detached starts and installed Windows, systemd,
+launchd, and SysV services. Startup diagnostics retain their last 64 KiB independently
+of log rotation. On Unix, an owner-only `.startup` result beside the PID file is
+retained after exit so even an immediately failing JVM can be reported to `start`.
 New service registrations preserve the selected configuration file, runtime
 property overrides, and application arguments. Account/password overrides used
 to register a Windows service are excluded from its persisted command line.
@@ -114,9 +125,12 @@ JVM-only restarts reject account changes. Reinstall native services to update
 their registered account.
 
 Existing systemd units invoking `service.sh start sysd` and launchd plists invoking
-`service.sh launchdinternal` remain supported. macOS retains the existing
-`org.tanukisoftware.wrapper.<name>` service label. The Windows `-s <config>` service
-entry point and amd64 executable filename remain unchanged. Configuration filenames,
+`service.sh launchdinternal` remain supported. All platforms use `wrapper.name`
+as the service name: the launchd label on macOS, systemd unit basename or SysV
+script name on Linux, and SCM service name on Windows. Stop and remove a service
+using its old wrapper before migrating a service name, then install it with the
+new wrapper and configuration. The Windows `-s <config>` service entry point and
+amd64 executable filename remain unchanged. Configuration filenames,
 boot-relative paths, `.shconf`, `RUN_AS_USER`, and `FILES_TO_SOURCE` remain supported.
 
 Stop a deployment before replacing its wrapper files.
@@ -157,16 +171,17 @@ settings include:
   `wrapper.console.loglevel=NONE` and `wrapper.logfile.loglevel=NONE` disable their
   destinations. Other levels preserve the application's unmodified stdout/stderr;
   application filtering remains in your application's logging configuration.
-  Disabling file logging does not suppress errors returned by startup commands.
-  Use `console` for diagnostics if the supervisor cannot initialize.
+  Disabling file logging does not disable startup error reporting in the `start`
+  command's terminal.
 - `wrapper.startup.timeout`, `wrapper.shutdown.timeout` (0 means unlimited),
-  `wrapper.restart.delay`, `wrapper.max_failed_invocations`,
-  `wrapper.successful_invocation_time`, `wrapper.restart.reload_configuration`,
-  `wrapper.on_exit.<code>` and `wrapper.on_exit.default` (`RESTART`/`SHUTDOWN`).
-  Normal exit defaults to shutdown; a crash defaults to restart. Explicit Java API
-  stop/restart requests take precedence. `wrapper.restart.disabled=TRUE` disables retries for one-shot commands.
+  `wrapper.restart.delay`, and `wrapper.restart.reload_configuration`.
+  JVM exit, failure, or timeout stops the wrapper. Explicit Java API restart requests
+  are honored without a limit; an operator's stop takes precedence.
+  Legacy `wrapper.on_exit.*`, `wrapper.max_failed_invocations`,
+  `wrapper.successful_invocation_time`, and `wrapper.restart.disabled` settings are
+  accepted but have no effect.
 - `wrapper.pidfile` and `wrapper.startup.wait.timeout` (default 120 seconds for
-  startup commands; 0 waits without a time limit). The PID file is retained empty
+  startup confirmation; 0 waits without a time limit). The PID file is retained empty
   after shutdown so its OS lock cannot be bypassed by racing unlink/recreation.
 
 The wrapper implements the Java main-class service lifecycle, not the entire JSW product.
@@ -190,7 +205,7 @@ JVM descendants.
 The Java bridge also initiates shutdown when its supervisor connection is lost,
 and forcibly exits if hooks exceed `wrapper.shutdown.timeout`. For this parent-loss
 case only, an unlimited timeout (`0`) uses a 30-second fallback.
-Crash retries are bounded, and control remains available during restart delays.
+Control remains available during delays between JVM-requested restarts.
 The Java version probe also observes `wrapper.startup.timeout` and remains
 cancellable through stop commands and termination signals.
 Custom Unix Java launchers and application helpers must stay in the inherited
@@ -219,9 +234,13 @@ python3 package.py --archive dist/artifacts
 ```
 
 `build.sh` without arguments builds for the host (using a static musl target on
-Linux). Outputs go to `dist/boot`. `package.py` requires all five
+Linux). Outputs go to `dist/boot`. Run `./build.sh clean` to remove Rust build
+artifacts (honoring `CARGO_TARGET_DIR`), generated Java files, and distributions
+under `build` and `dist`.
+
+`package.py` requires all five
 binaries, verifies their architecture, collects dependency license texts in
-`wrapper.jar`, and writes `SHA256SUMS`. The output is `dist/release/servicewrapper`.
+`wrapper.jar`, and writes `SHA256SUMS`. The output is `dist/release/wrapper`.
 Use `--destination` to choose another output directory. `--archive` additionally
 writes a versioned archive and SHA-256 file to the supplied directory.
 Vendored license texts include pinned provenance in `licenses/sources.json`.
@@ -249,13 +268,18 @@ bash tests/linux-smoke.sh
 The integration suite requires localhost sockets and launches only temporary JVM
 fixtures. It checks configuration, quoting, shutdown hooks, forced shutdown, startup
 timeouts, duplicate starts, authenticated control, restarts with configuration reload,
-parent death, bounded crash retries, log rotation, and launcher/maintenance arguments.
+parent death, exit without relaunch, repeated JVM-requested restarts, log rotation,
+and launcher/maintenance arguments.
 The Linux smoke test also runs in a disposable Java 17 container with this project
 mounted read-only. Run each architecture's binary on its corresponding host or emulator.
 
 `tests/service-unix.sh` and `tests/service.ps1` test actual OS service installation,
 restart, shutdown hooks, and removal using a unique fixture service. Run these as
 administrator/root on disposable hosts, never against a production instance.
+`tests/native-startup.py` exercises systemd/launchd startup confirmation and
+diagnostic forwarding with mocked service managers and a real JVM. It also checks
+saved installation overrides and execution of launchers as the service account;
+run it as root on a disposable Unix host.
 
 Validated during this implementation: all five release binaries built; Rust
 unit tests and macOS JVM integration tests passed; Linux arm64 and amd64

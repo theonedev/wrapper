@@ -66,17 +66,17 @@ pub fn command(
     };
     let stdout = stdout.join().unwrap()?;
     let stderr = stderr.join().unwrap()?;
-    ensure!(
-        status.success(),
-        "Java version check failed: {}",
-        String::from_utf8_lossy(&stderr)
-    );
     let version_text = format!(
         "{}{}",
         String::from_utf8_lossy(&stdout),
         String::from_utf8_lossy(&stderr)
     );
-    let major = java_major(&version_text).context("Unable to read Java version")?;
+    ensure!(
+        status.success(),
+        "Java version check failed ({status}):\n{version_text}"
+    );
+    let major = java_major(&version_text)
+        .with_context(|| format!("Unable to read Java version:\n{version_text}"))?;
     ensure!(
         major >= config.number("wrapper.java.version.min", 17)?,
         "Java {major} does not meet wrapper.java.version.min"
@@ -134,21 +134,18 @@ pub fn command(
     }
     cmd.arg("-cp").arg(std::env::join_paths(classpath)?);
     // Launch any Java main class through the lifecycle bridge; no JSW JNI dependency.
-    cmd.env("SERVICEWRAPPER_PORT", port.to_string())
-        .env("SERVICEWRAPPER_TOKEN", token)
+    cmd.env("WRAPPER_PORT", port.to_string())
+        .env("WRAPPER_TOKEN", token)
         .env(
-            "SERVICEWRAPPER_SHUTDOWN_TIMEOUT",
+            "WRAPPER_SHUTDOWN_TIMEOUT",
             config.number("wrapper.shutdown.timeout", 30)?.to_string(),
         );
-    cmd.arg("org.servicewrapper.WrapperSimpleApp");
+    cmd.arg("io.onedev.wrapper.WrapperSimpleApp");
     let main = config.get(
         "wrapper.java.mainclass",
-        "org.servicewrapper.WrapperSimpleApp",
+        "io.onedev.wrapper.WrapperSimpleApp",
     );
-    if !matches!(
-        main,
-        "org.servicewrapper.WrapperSimpleApp" | "org.tanukisoftware.wrapper.WrapperSimpleApp"
-    ) {
+    if main != "io.onedev.wrapper.WrapperSimpleApp" {
         cmd.arg(main);
     }
     cmd.args(config.numbered("wrapper.app.parameter."))

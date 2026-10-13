@@ -9,20 +9,28 @@ use std::{
 };
 
 pub struct Log {
-    sender: SyncSender<Vec<u8>>,
+    sender: SyncSender<Entry>,
     worker: JoinHandle<()>,
+    pub startup: Option<crate::startup::Capture>,
+}
+
+enum Entry {
+    Output(Vec<u8>),
+    Error(Vec<u8>),
+    Flush(mpsc::Sender<()>),
 }
 impl Log {
+    #[cfg(windows)]
     pub fn new(config: &Config, console: bool) -> Result<Self> {
-        Self::open(config, console, !console)
+        Self::with_startup(config, console, None)
     }
-    pub fn error(config: &Config, error: &anyhow::Error) -> Result<()> {
-        let log = Self::open(config, false, false)?;
-        log.message(&format!("{error:#}"));
-        log.close();
-        Ok(())
-    }
-    fn open(config: &Config, console: bool, redirect: bool) -> Result<Self> {
+    pub fn with_startup(
+        config: &Config,
+        console: bool,
+        startup: Option<crate::startup::Capture>,
+    ) -> Result<Self> {
+        let redirect = !console;
+        let errors_to_stderr = console;
         let mut file = None;
         let path = config.path("wrapper.logfile", "../logs/console.log");
         if !config
@@ -45,15 +53,30 @@ impl Log {
                 .eq_ignore_ascii_case("NONE");
         let max = size(config.get("wrapper.logfile.maxsize", "250k"))?;
         let count = config.number("wrapper.logfile.maxfiles", 3)?;
-        let (sender, receiver) = mpsc::sync_channel::<Vec<u8>>(128);
+        let (sender, receiver) = mpsc::sync_channel(128);
+        let capture = startup.clone();
         let worker = thread::spawn(move || {
             let mut length = file
                 .as_ref()
                 .and_then(|f| f.metadata().ok())
                 .map(|m| m.len())
                 .unwrap_or(0);
-            for bytes in receiver {
-                if console {
+            for entry in receiver {
+                let (bytes, error) = match entry {
+                    Entry::Output(bytes) => (bytes, false),
+                    Entry::Error(bytes) => (bytes, true),
+                    Entry::Flush(done) => {
+                        let _ = done.send(());
+                        continue;
+                    }
+                };
+                if let Some(capture) = &capture {
+                    capture.record(&bytes);
+                }
+                if error && errors_to_stderr {
+                    let _ = std::io::stderr().write_all(&bytes);
+                    let _ = std::io::stderr().flush();
+                } else if !error && console {
                     let _ = std::io::stdout().write_all(&bytes);
                     let _ = std::io::stdout().flush();
                 }
@@ -73,18 +96,27 @@ impl Log {
                         Ok(())
                     })();
                     if let Err(error) = result {
-                        eprintln!("ServiceWrapper: log write failed: {error:#}");
+                        eprintln!("Wrapper: log write failed: {error:#}");
                         file = None;
                     }
                 }
             }
         });
-        Ok(Self { sender, worker })
+        Ok(Self {
+            sender,
+            worker,
+            startup,
+        })
     }
     pub fn message(&self, text: &str) {
         let _ = self
             .sender
-            .send(format!("ServiceWrapper: {text}\n").into_bytes());
+            .send(Entry::Output(format!("Wrapper: {text}\n").into_bytes()));
+    }
+    pub fn error(&self, text: &str) {
+        let _ = self
+            .sender
+            .send(Entry::Error(format!("Wrapper: {text}\n").into_bytes()));
     }
     pub fn pipe(&self, mut input: impl Read + Send + 'static) -> JoinHandle<()> {
         let sender = self.sender.clone();
@@ -94,13 +126,19 @@ impl Log {
                 match input.read(&mut bytes) {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
-                        if sender.send(bytes[..n].to_vec()).is_err() {
+                        if sender.send(Entry::Output(bytes[..n].to_vec())).is_err() {
                             break;
                         }
                     }
                 }
             }
         })
+    }
+    pub fn flush(&self) {
+        let (done, receiver) = mpsc::channel();
+        if self.sender.send(Entry::Flush(done)).is_ok() {
+            let _ = receiver.recv();
+        }
     }
     pub fn close(self) {
         drop(self.sender);

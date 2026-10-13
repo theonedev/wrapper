@@ -33,7 +33,7 @@ class WrapperIntegration(unittest.TestCase):
                         "-d", str(cls.classes), str(PROJECT / "tests/Fixture.java")], check=True)
 
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix="ServiceWrapper space ")
+        self.temp = tempfile.TemporaryDirectory(prefix="Wrapper space ")
         self.root = Path(self.temp.name)
         for directory in ("boot", "bin", "conf", "logs"):
             (self.root / directory).mkdir()
@@ -54,7 +54,6 @@ wrapper.java.additional.10=-Dfixture.value="before with spaces"
 wrapper.shutdown.timeout=3
 wrapper.startup.timeout=5
 wrapper.restart.delay=0
-wrapper.max_failed_invocations=2
 '''
         self.config.write_text(self.source)
         self.processes = []
@@ -126,18 +125,86 @@ wrapper.max_failed_invocations=2
                 self.assertEqual(self.events(), [])
 
     @unittest.skipIf(os.name == "nt", "Detached Unix startup")
+    def test_detached_start_rejects_fifo_result_without_hanging(self):
+        os.mkfifo(self.root / "bin/fixture.pid.startup")
+        result = self.command("start", "wrapper.startup.wait.timeout=1", check=False, timeout=3)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Expected regular startup result file", result.stdout)
+        self.assertEqual(self.command("status", check=False, timeout=3).returncode, 3)
+        self.assertFalse((self.root / "logs/console.log").exists())
+
+    @unittest.skipIf(os.name == "nt", "Detached Unix startup")
     def test_detached_start_unlimited_wait(self):
-        self.command("start", "wrapper.startup.wait.timeout=0", timeout=10)
-        self.assertIn("RUNNING", self.command("status", timeout=3).stdout)
+        result = self.command("start", "wrapper.startup.wait.timeout=0", timeout=10)
+        self.assertEqual(result.stdout, "Starting...\nStarted\n")
+        self.assertEqual(self.command("status", timeout=3).stdout, "RUNNING\n")
+
+    def test_startup_errors_reach_configured_log(self):
+        modes = ("console",) if os.name == "nt" else ("console", "start", "service-console")
+        cases = [
+            ("missing-java", [f"wrapper.java.command={self.root}/missing-java"], "Launching "),
+            ("jvm-option", ["wrapper.java.additional.20=-Xmxinvalid-fixture-size"], "invalid-fixture-size"),
+            ("classpath", ["wrapper.java.classpath.1=../missing", "wrapper.java.classpath.2=../missing/*.jar"],
+             "ClassNotFoundException: Fixture"),
+            ("entry-class", ["wrapper.java.mainclass=MissingEntry"], "ClassNotFoundException: MissingEntry"),
+            ("entry-method", ["wrapper.java.mainclass=java.lang.String"], "NoSuchMethodException"),
+            ("bridge", [], "Missing "),
+        ]
+        if os.name != "nt":
+            for name, code in (("failed-probe", 1), ("invalid-probe", 0)):
+                executable = self.root / name
+                executable.write_text(f'#!/bin/sh\necho "{name}: Java runtime unavailable"\nexit {code}\n')
+                executable.chmod(0o755)
+                cases.append((name, [f"wrapper.java.command={executable}"], f"{name}: Java runtime unavailable"))
+            executable = self.root / "non-executable-java"
+            executable.write_text("not executable")
+            executable.chmod(0o600)
+            cases.append(("non-executable", [f"wrapper.java.command={executable}"], "Launching "))
+        for mode in modes:
+            for case, overrides, error in cases:
+                with self.subTest(mode=mode, failure=case):
+                    diagnostic = self.root / "startup logs" / f"{mode}-{case}.log"
+                    bridge = self.root / "boot/wrapper.jar"
+                    backup = bridge.with_suffix(".backup")
+                    if case == "bridge":
+                        bridge.rename(backup)
+                    args = [str(self.binary), mode, str(self.config)]
+                    if mode == "service-console":
+                        # The internal entry point used by systemd and launchd.
+                        args = [str(self.binary), "--script", "service", str(self.config),
+                                "--service", "console", str(self.config)]
+                    try:
+                        result = subprocess.run(
+                            [*args, f"wrapper.logfile={diagnostic}", *overrides],
+                            text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=10)
+                        if mode == "start":
+                            self.assertIn("Starting...", result.stdout)
+                            if case not in ("classpath", "entry-class", "entry-method"):
+                                self.assertNotEqual(result.returncode, 0, result.stdout)
+                                self.assertIn(error, result.stdout)
+                                self.assertNotIn("Started", result.stdout)
+                            # The bridge can report RUNNING before main-class loading fails.
+                            self.wait_for(lambda: self.command("status", check=False, timeout=3).returncode == 3)
+                            self.wait_for(lambda: diagnostic.exists() and error in diagnostic.read_text())
+                        else:
+                            self.assertNotEqual(result.returncode, 0, result.stdout)
+                        self.assertIn(error, diagnostic.read_text())
+                        self.assertFalse((self.root / "logs/console.log").exists())
+                    finally:
+                        if backup.exists():
+                            backup.rename(bridge)
+                        self.command("stop", check=False, timeout=10)
 
     @unittest.skipIf(os.name == "nt", "Detached Unix startup")
     def test_detached_start_with_file_logging_disabled(self):
         # A regular file cannot be used as a directory, even when tests run as root.
         blocker = self.root / "log-blocker"
         blocker.write_text("unchanged")
-        self.command("start", "wrapper.logfile.loglevel=NONE",
-                     f"wrapper.logfile={blocker}/console.log", timeout=10)
-        self.assertIn("RUNNING", self.command("status", timeout=3).stdout)
+        result = self.command("start", "wrapper.logfile.loglevel=NONE",
+                              f"wrapper.logfile={blocker}/console.log", timeout=10)
+        self.assertEqual(result.stdout, "Starting...\nStarted\n")
+        self.assertNotIn(str(blocker), result.stdout)
+        self.assertEqual(self.command("status", timeout=3).stdout, "RUNNING\n")
         self.assertEqual(blocker.read_text(), "unchanged")
         self.assertEqual(list((self.root / "logs").iterdir()), [])
 
@@ -150,7 +217,8 @@ wrapper.max_failed_invocations=2
                               check=False, timeout=10)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("failed to start", result.stdout)
-        self.assertIn("run console for startup diagnostics", result.stdout)
+        self.assertIn("missing-java", result.stdout)
+        self.assertNotIn("Started", result.stdout)
         self.assertNotIn(str(diagnostic), result.stdout)
         self.assertFalse(diagnostic.parent.exists())
 
@@ -184,9 +252,9 @@ wrapper.max_failed_invocations=2
              "wrapper.pidfile=../bin/installed.pid", "wrapper.logfile=../logs/installed.log", "--"],
             env=environment, capture_output=True, text=True, timeout=10)
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("Java version check failed: Unable to locate a Java Runtime", result.stderr)
-        self.assertIn("Java version check failed: Unable to locate a Java Runtime",
-                      (self.root / "logs/installed.log").read_text())
+        for output in (result.stderr, (self.root / "logs/installed.log").read_text()):
+            self.assertIn("Java version check failed", output)
+            self.assertIn("Unable to locate a Java Runtime", output)
         self.assertEqual((self.root / "bin/installed.pid").read_text(), "")
 
     @unittest.skipIf(os.name == "nt", "Unix helpers escaping the probe process group")
@@ -280,7 +348,8 @@ wrapper.max_failed_invocations=2
     @unittest.skipIf(os.name == "nt", "Detached Unix logging")
     def test_detached_diagnostics_follow_rotation(self):
         self.config.write_text(self.source + "wrapper.java.additional.20=-Dfixture.mode=logs\n"
-                               + "wrapper.logfile.maxsize=1k\nwrapper.logfile.maxfiles=1\nwrapper.on_exit.0=RESTART\n")
+                               + "wrapper.java.additional.21=-Dfixture.restart.after.logs=true\n"
+                               + "wrapper.logfile.maxsize=1k\nwrapper.logfile.maxfiles=1\n")
         self.command("start", timeout=10)
         self.wait_for(lambda: (self.root / "logs/console.log.1").exists())
         self.config.write_text(self.config.read_text() + "wrapper.name=invalid name\n")
@@ -445,16 +514,17 @@ wrapper.java.additional.10=-Dfixture.value=%FIXTURE_CASE%/%fixture_case%/%Fixtur
             self.assertIn("RUNNING", self.command("status", timeout=2).stdout)
             time.sleep(0.5)
             connection.sendall(f"{control[1]} status\n".encode())
-            self.assertEqual(connection.recv(32), b"RUNNING\n")
-        self.assertIn("RUNNING", self.command("status").stdout)
+            self.assertEqual(connection.makefile("rb").readline(), b"RUNNING\n")
+        self.assertEqual(self.command("status").stdout, "RUNNING\n")
         self.config.write_text(self.source.replace("before with spaces", "after reload"))
         (self.root / "restart").touch()
         self.wait_for(lambda: any(line.endswith("after reload") for line in self.events()))
         self.assertEqual((self.root / "bin/fixture.pid").read_text(), wrapper_pid)
         self.assertEqual(len([e for e in self.events() if e.startswith("start ")]), 2)
-        self.command("stop", timeout=10)
+        self.assertEqual(self.command("stop", timeout=10).stdout, "Stopping...\nStopped\n")
         self.assertEqual(len([e for e in self.events() if e.startswith("stop ")]), 2)
-        self.assertEqual(self.command("status", check=False).returncode, 3)
+        status = self.command("status", check=False)
+        self.assertEqual((status.returncode, status.stdout), (3, "STOPPED\n"))
         self.command("start", timeout=10)
         self.command("stop", timeout=10)
 
@@ -477,18 +547,31 @@ wrapper.java.additional.10=-Dfixture.value=%FIXTURE_CASE%/%fixture_case%/%Fixtur
         self.assertTrue(self.events()[-1].startswith("stop "))
         self.assertEqual(self.command("status", check=False, timeout=5).returncode, 3)
 
-    def test_crash_restarts_are_bounded(self):
+    def test_crash_stops_wrapper_without_relaunch(self):
         result = self.command("console", "wrapper.java.additional.20=-Dfixture.mode=crash", check=False, timeout=15)
         self.assertEqual(result.returncode, 9, result.stdout)
-        self.assertEqual(len([e for e in self.events() if e.startswith("start ")]), 2)
+        self.assertEqual(len([e for e in self.events() if e.startswith("start ")]), 1)
+        self.assertNotIn("Restarting JVM", result.stdout)
+        self.assertEqual(self.command("status", check=False, timeout=3).returncode, 3)
 
-    def test_main_failure_follows_exit_policy(self):
-        for overrides, invocations in (
-            ([], 2),
-            (["wrapper.on_exit.1=RESTART", "wrapper.on_exit.default=SHUTDOWN"], 2),
-            (["wrapper.on_exit.1=SHUTDOWN"], 1),
-            (["wrapper.on_exit.default=SHUTDOWN"], 1),
-            (["wrapper.restart.disabled=TRUE"], 1),
+    def test_requested_restart_does_not_enable_automatic_relaunch(self):
+        process = self.console()
+        self.wait_for(lambda: len(self.events()) == 1)
+        self.config.write_text(self.source + "wrapper.java.additional.20=-Dfixture.mode=crash\n"
+                               + "wrapper.on_exit.default=RESTART\n")
+        (self.root / "restart").touch()
+        self.assertEqual(process.wait(timeout=10), 9)
+        self.assertEqual(len([e for e in self.events() if e.startswith("start ")]), 2)
+        self.assertEqual(len([e for e in self.events() if e.startswith("stop ")]), 1)
+        self.assertEqual(self.command("status", check=False, timeout=3).returncode, 3)
+
+    def test_main_failure_stops_wrapper_regardless_of_exit_policy(self):
+        for overrides in (
+            [],
+            ["wrapper.on_exit.1=RESTART", "wrapper.on_exit.default=SHUTDOWN"],
+            ["wrapper.on_exit.default=RESTART"],
+            ["wrapper.on_exit.1=SHUTDOWN"],
+            ["wrapper.restart.disabled=FALSE", "wrapper.max_failed_invocations=100"],
         ):
             with self.subTest(overrides=overrides):
                 before = len(self.events())
@@ -497,16 +580,16 @@ wrapper.java.additional.10=-Dfixture.value=%FIXTURE_CASE%/%fixture_case%/%Fixtur
                 self.assertEqual(result.returncode, 1, result.stdout)
                 self.assertIn("Fixture main failed", result.stdout)
                 events = self.events()[before:]
-                self.assertEqual(len([e for e in events if e.startswith("start ")]), invocations)
+                self.assertEqual(len([e for e in events if e.startswith("start ")]), 1)
                 # The hook waits for main to return, so failure shutdown must stay asynchronous.
-                self.assertEqual(len([e for e in events if e.startswith("stop ")]), invocations)
+                self.assertEqual(len([e for e in events if e.startswith("stop ")]), 1)
 
     def test_main_failure_shutdown_timeout(self):
         result = self.command("console", "wrapper.java.additional.20=-Dfixture.mode=throw-hang",
                               "wrapper.shutdown.timeout=1", check=False, timeout=10)
         self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertEqual(result.stdout.count("Shutdown timeout expired"), 2)
-        self.assertEqual(len([e for e in self.events() if e.startswith("start ")]), 2)
+        self.assertEqual(result.stdout.count("Shutdown timeout expired"), 1)
+        self.assertEqual(len([e for e in self.events() if e.startswith("start ")]), 1)
 
     def test_direct_jvm_shutdown_timeout(self):
         for mode in ("once", "exit"):
@@ -516,13 +599,13 @@ wrapper.java.additional.10=-Dfixture.value=%FIXTURE_CASE%/%fixture_case%/%Fixtur
                                       "wrapper.java.additional.21=-Dfixture.shutdown.delay=60000",
                                       "wrapper.shutdown.timeout=1", check=False, timeout=10)
                 self.assertEqual(result.returncode, 1, result.stdout)
-                self.assertEqual(result.stdout.count("Shutdown timeout expired"), 2)
-                self.assertEqual(len([e for e in self.events()[before:] if e.startswith("start ")]), 2)
+                self.assertEqual(result.stdout.count("Shutdown timeout expired"), 1)
+                self.assertEqual(len([e for e in self.events()[before:] if e.startswith("start ")]), 1)
 
-    def test_direct_jvm_shutdown_preserves_exit_policy(self):
-        for mode, policy, code, invocations in (
-            ("once", "wrapper.on_exit.0=RESTART", 1, 2),
-            ("exit", "wrapper.on_exit.7=SHUTDOWN", 7, 1),
+    def test_direct_jvm_shutdown_preserves_exit_code_without_relaunch(self):
+        for mode, policy, code in (
+            ("once", "wrapper.on_exit.0=RESTART", 0),
+            ("exit", "wrapper.on_exit.7=RESTART", 7),
         ):
             with self.subTest(mode=mode):
                 before = len(self.events())
@@ -531,8 +614,8 @@ wrapper.java.additional.10=-Dfixture.value=%FIXTURE_CASE%/%fixture_case%/%Fixtur
                                       check=False, timeout=10)
                 self.assertEqual(result.returncode, code, result.stdout)
                 events = self.events()[before:]
-                self.assertEqual(len([e for e in events if e.startswith("start ")]), invocations)
-                self.assertEqual(len([e for e in events if e.startswith("stop ")]), invocations)
+                self.assertEqual(len([e for e in events if e.startswith("start ")]), 1)
+                self.assertEqual(len([e for e in events if e.startswith("stop ")]), 1)
 
     def test_direct_jvm_shutdown_unlimited(self):
         result = self.command("console", "wrapper.java.additional.20=-Dfixture.mode=exit",
@@ -564,7 +647,7 @@ wrapper.java.additional.10=-Dfixture.value=%FIXTURE_CASE%/%fixture_case%/%Fixtur
         executable.chmod(0o755)
         result = self.command("console", f"wrapper.java.command={executable}", "wrapper.startup.timeout=1", check=False, timeout=10)
         self.assertNotEqual(result.returncode, 0)
-        self.assertEqual(result.stdout.count("JVM bridge startup timed out"), 2)
+        self.assertEqual(result.stdout.count("JVM bridge startup timed out"), 1)
 
     def test_rotation(self):
         result = self.command("console", "wrapper.java.additional.20=-Dfixture.mode=logs", "wrapper.logfile.maxsize=2k", "wrapper.logfile.maxfiles=2", timeout=15)
@@ -589,7 +672,7 @@ wrapper.java.additional.10=-Dfixture.value=%FIXTURE_CASE%/%fixture_case%/%Fixtur
                 self.assertIn("arg=migrate", result.stdout)
 
     @unittest.skipIf(os.name == "nt", "Bash launcher")
-    def test_generic_main_with_arguments_restarts_but_commands_do_not(self):
+    def test_generic_and_command_launchers_do_not_relaunch_after_exit(self):
         self.config.write_text(self.source.replace("wrapper.app.parameter.1=Fixture", "wrapper.java.mainclass=Fixture")
                                + "wrapper.java.additional.20=-Dfixture.mode=crash\n")
         path = self.root / "bin/my-java-app.sh"
@@ -598,29 +681,29 @@ wrapper.java.additional.10=-Dfixture.value=%FIXTURE_CASE%/%fixture_case%/%Fixtur
         path.chmod(0o755)
         result = subprocess.run([str(path), "console", "--port", "8080"], capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 9, result.stdout + result.stderr)
-        self.assertEqual(len(self.events()), 2, self.events())
+        self.assertEqual(len(self.events()), 1, self.events())
         path.write_text(source.replace(" --script ", " --command "))
         result = subprocess.run([str(path), "migrate"], capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 9, result.stdout + result.stderr)
-        self.assertEqual(len(self.events()), 3, self.events())
-        result = self.command("console", "wrapper.restart.disabled=TRUE", "--", "migrate", check=False, timeout=10)
+        self.assertEqual(len(self.events()), 2, self.events())
+        result = self.command("console", "--", "migrate", check=False, timeout=10)
         self.assertEqual(result.returncode, 9, result.stdout)
-        self.assertEqual(len(self.events()), 4, self.events())
+        self.assertEqual(len(self.events()), 3, self.events())
 
-    def test_generic_and_jsw_bridge_lifecycle(self):
-        for main, legacy in (("org.servicewrapper.WrapperSimpleApp", "false"),
-                             ("org.tanukisoftware.wrapper.WrapperSimpleApp", "true")):
-            with self.subTest(main=main):
-                self.config.write_text(self.source + f"wrapper.java.mainclass={main}\n"
-                                       + f"wrapper.java.additional.20=-Dfixture.legacy_api={legacy}\n")
-                before = len(self.events())
-                process = self.console()
-                self.wait_for(lambda: len(self.events()) == before + 1)
-                (self.root / "restart").touch()
-                self.wait_for(lambda: len(self.events()) == before + 3)
-                (self.root / "stop").touch()
-                self.assertEqual(process.wait(timeout=10), 0)
-                self.assertEqual(len(self.events()), before + 4)
+    def test_bridge_lifecycle(self):
+        self.config.write_text(self.source + "wrapper.java.mainclass=io.onedev.wrapper.WrapperSimpleApp\n"
+                               + "wrapper.max_failed_invocations=1\nwrapper.successful_invocation_time=0\n"
+                               + "wrapper.on_exit.default=SHUTDOWN\nwrapper.restart.disabled=TRUE\n")
+        before = len(self.events())
+        process = self.console()
+        self.wait_for(lambda: len(self.events()) == before + 1)
+        # Explicit requests must keep working beyond the old default retry limit.
+        for invocation in range(1, 7):
+            (self.root / "restart").touch()
+            self.wait_for(lambda: len(self.events()) == before + invocation * 2 + 1)
+        (self.root / "stop").touch()
+        self.assertEqual(process.wait(timeout=10), 0)
+        self.assertEqual(len(self.events()), before + 14)
 
     @unittest.skipIf(os.name == "nt", "Unix launcher paths")
     def test_launcher_path_is_generic_and_configurable(self):

@@ -22,7 +22,7 @@ pub enum State {
 }
 pub static STOP: AtomicBool = AtomicBool::new(false);
 
-fn secure_file(path: &PathBuf) -> Result<File> {
+pub(crate) fn secure_file(path: &PathBuf) -> Result<File> {
     let mut options = OpenOptions::new();
     options.create(true).read(true).write(true);
     #[cfg(unix)]
@@ -90,6 +90,16 @@ pub fn request(config: &Config, command: &str) -> Result<Option<String>> {
     {
         Ok(lock) => lock,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error)
+            if command == "status"
+                && error.kind() == std::io::ErrorKind::PermissionDenied
+                && fs::metadata(config.pid_file())
+                    .is_ok_and(|metadata| metadata.is_file() && metadata.len() == 0) =>
+        {
+            // Shutdown retains an empty PID file, possibly owned by another account.
+            // Its metadata is enough to report STOPPED without access to control files.
+            return Ok(None);
+        }
         Err(error) => {
             return Err(error).context("Run this command as the service account or administrator");
         }
@@ -234,18 +244,31 @@ pub fn start(options: &Options, config: &Config) -> Result<i32> {
     }
     // Validate before spawning: an invalid wait must not leave a daemon behind.
     let timeout = config.number("wrapper.startup.wait.timeout", 120)?;
+    let startup = crate::startup::FileWait::new(crate::startup::path(&config), None)?;
+    let started = if options.internal {
+        "Service started"
+    } else {
+        "Started"
+    };
+    println!(
+        "{}",
+        if options.internal {
+            "Starting service..."
+        } else {
+            "Starting..."
+        }
+    );
     let mut command = Command::new(std::env::current_exe()?);
     command
         .args(options.child_args("daemon"))
         .stdin(std::process::Stdio::null());
-    let diagnostics = if config
+    if config
         .get("wrapper.logfile.loglevel", "INFO")
         .eq_ignore_ascii_case("NONE")
     {
         command
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
-        "run console for startup diagnostics".to_owned()
     } else {
         // Preserve startup diagnostics even if Java cannot be launched.
         let diagnostic = config.path("wrapper.logfile", "../logs/console.log");
@@ -258,8 +281,7 @@ pub fn start(options: &Options, config: &Config) -> Result<i32> {
             .open(&diagnostic)
             .with_context(|| format!("Opening {}", diagnostic.display()))?;
         command.stdout(output.try_clone()?).stderr(output);
-        format!("see {}", diagnostic.display())
-    };
+    }
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -275,112 +297,112 @@ pub fn start(options: &Options, config: &Config) -> Result<i32> {
     let mut child = command.spawn()?;
     let start = Instant::now();
     while timeout == 0 || start.elapsed() < Duration::from_secs(timeout) {
-        if let Some(status) = child.try_wait()? {
-            let failure = crate::startup::read(&config, unsafe { libc::geteuid() })?
-                .filter(|record| record.pid == child.id() && record.state == "STOPPED")
-                .map(|record| format!("; {}", record.message))
-                .unwrap_or_default();
-            bail!(
-                "{} failed to start ({status}){failure}; {diagnostics}",
-                config.name()
-            );
-        }
-        if let Ok(Some(state)) = request(&config, "status")
-            && state == "RUNNING"
-        {
-            println!("{} started", config.name());
+        if startup.poll()? {
+            println!("{started}");
             return Ok(0);
+        }
+        if let Some(status) = child.try_wait()? {
+            // The final result may have been written between polling and exit.
+            if startup.poll()? {
+                println!("{started}");
+                return Ok(0);
+            }
+            bail!("{} failed to start ({status})", config.name());
         }
         thread::sleep(Duration::from_millis(100));
     }
     let _ = request(&config, "stop");
-    bail!("Startup timed out; stop requested; {diagnostics}")
+    bail!("Startup timed out; stop requested")
 }
 
-pub fn stop(config: &Config) -> Result<i32> {
-    if request(config, "stop")?.is_none() {
-        println!("{} is not running", config.name());
-        return Ok(0);
+pub fn stop(config: &Config, installed: bool) -> Result<i32> {
+    println!(
+        "{}",
+        if installed {
+            "Stopping service..."
+        } else {
+            "Stopping..."
+        }
+    );
+    if request(config, "stop")?.is_some() {
+        // Zero has the JSW meaning: allow shutdown hooks to complete without a time limit.
+        while request(config, "status")?.is_some() {
+            thread::sleep(Duration::from_millis(100));
+        }
     }
-    // Zero has the JSW meaning: allow shutdown hooks to complete without a time limit.
-    while request(config, "status")?.is_some() {
-        thread::sleep(Duration::from_millis(100));
-    }
-    println!("{} stopped", config.name());
+    println!(
+        "{}",
+        if installed {
+            "Service stopped"
+        } else {
+            "Stopped"
+        }
+    );
     Ok(0)
 }
 
-pub fn run(options: &Options, state_changed: impl FnMut(State) -> Result<()>) -> Result<i32> {
+pub fn run(
+    options: &Options,
+    state_changed: impl FnMut(State) -> Result<()>,
+    startup: Option<crate::startup::Capture>,
+) -> Result<i32> {
     #[cfg(unix)]
     crate::service::switch_user(&options.load()?)?;
     // Reload after an account switch to apply set.* overrides to the account's environment.
     let initial = options.load()?;
-    let result = run_supervisor(options, initial.clone(), state_changed);
-    // Detached Unix stderr is already redirected to the rotating log; SCM logs
-    // its failures itself. Console services (including launchd/systemd) need an
-    // explicit file entry as their stderr may never reach an operator.
-    if let Err(error) = &result
-        && !matches!(options.command.as_str(), "daemon" | "service")
-        && let Err(log_error) = Log::error(&options.load().unwrap_or(initial), error)
-    {
-        eprintln!("ServiceWrapper: Unable to log startup failure: {log_error:#}");
-    }
-    result
-}
-
-fn run_supervisor(
-    options: &Options,
-    initial: Config,
-    mut state_changed: impl FnMut(State) -> Result<()>,
-) -> Result<i32> {
     let listener = TcpListener::bind(("127.0.0.1", 0))?;
     listener.set_nonblocking(true)?;
     let mut random = [0u8; 32];
     getrandom::fill(&mut random)
         .map_err(|e| anyhow::anyhow!("Random number generation failed: {e}"))?;
     let token: String = random.iter().map(|b| format!("{b:02x}")).collect();
-    let port = listener.local_addr()?.port();
-    let _instance = Instance::acquire(&initial, port, &token)?;
+    let _instance = Instance::acquire(&initial, listener.local_addr()?.port(), &token)?;
     #[cfg(unix)]
-    let startup = if options.internal || options.command == "daemon" {
-        Some(crate::startup::Report::new(&initial, &token)?)
+    let startup = if options.command == "daemon" || options.internal {
+        Some(crate::startup::Capture::file(&initial, &token)?)
     } else {
-        None
+        startup
     };
-    let result = run_instance(options, initial, listener, token, |state| {
-        #[cfg(unix)]
-        if let Some(startup) = &startup {
-            startup.write(
-                match state {
-                    State::Starting => "STARTING",
-                    State::Running => "RUNNING",
-                    State::Stopping => "STOPPING",
-                },
-                "",
-            )?;
+    let mut log = match Log::with_startup(
+        &initial,
+        options.command != "daemon" && options.command != "service",
+        startup.clone(),
+    ) {
+        Ok(log) => log,
+        Err(error) => {
+            if let Some(startup) = &startup {
+                startup.record(format!("{error:#}").as_bytes());
+                startup.finish()?;
+            }
+            return Err(error);
         }
-        state_changed(state)
-    });
-    #[cfg(unix)]
+    };
+    let code = match run_logged(options, initial, &mut log, listener, token, state_changed) {
+        Ok(code) => code,
+        Err(error) => {
+            // Service managers may discard stderr. Use the active logger and drain
+            // it before returning, including failures before the JVM is spawned.
+            log.error(&format!("{error:#}"));
+            1
+        }
+    };
+    log.close();
     if let Some(startup) = startup {
-        let message = match &result {
-            Ok(code) => format!("Service exited with code {code}"),
-            Err(error) => format!("{error:#}"),
-        };
-        startup.write("STOPPED", &message)?;
+        startup.finish()?;
     }
-    result
+    Ok(code)
 }
 
-fn run_instance(
+fn run_logged(
     options: &Options,
     initial: Config,
+    log: &mut Log,
     listener: TcpListener,
     token: String,
     mut state_changed: impl FnMut(State) -> Result<()>,
 ) -> Result<i32> {
-    let port = listener.local_addr()?.port();
     let mut pending = Vec::new();
+    let port = listener.local_addr()?.port();
     let signaled = Arc::new(AtomicBool::new(false));
     let handler = signaled.clone();
     // SCM services have no console. Their control handler sets STOP directly.
@@ -389,26 +411,11 @@ fn run_instance(
             handler.store(true, Ordering::SeqCst);
         })?;
     }
-    let mut failures = 0;
+    let mut config = initial.clone();
     loop {
         if signaled.load(Ordering::SeqCst) || STOP.load(Ordering::SeqCst) {
             return Ok(0);
         }
-        let config = if initial.boolean("wrapper.restart.reload_configuration", true) {
-            options.load()?
-        } else {
-            initial.clone()
-        };
-        ensure!(
-            config.pid_file() == initial.pid_file(),
-            "Changing wrapper.name or wrapper.pidfile requires stopping the wrapper"
-        );
-        #[cfg(unix)]
-        ensure!(
-            config.user() == initial.user(),
-            "Changing wrapper.daemon.user or RUN_AS_USER requires stopping the wrapper"
-        );
-        let log = Log::new(&config, options.command != "daemon")?;
         state_changed(State::Starting)?;
         let command = java::command(&config, &options.arguments, port, &token, || {
             if signaled.load(Ordering::SeqCst) || STOP.load(Ordering::SeqCst) {
@@ -427,7 +434,6 @@ fn run_instance(
         })?;
         let Some(mut command) = command else {
             state_changed(State::Stopping)?;
-            log.close();
             return Ok(0);
         };
         let mut jvm = ManagedChild::spawn(&mut command)?;
@@ -497,6 +503,9 @@ fn run_instance(
                         ready = true;
                         if stopping.is_none() {
                             state_changed(State::Running)?;
+                            if let Some(startup) = &log.startup {
+                                startup.ready()?;
+                            }
                         }
                     }
                     "status" => {
@@ -558,44 +567,18 @@ fn run_instance(
         let _ = stderr.join();
         let stopped = signaled.load(Ordering::SeqCst) || STOP.load(Ordering::SeqCst);
         if stopped || requested_exit.is_some() {
-            log.close();
             return Ok(if forced {
                 1
             } else {
                 requested_exit.unwrap_or(0)
             });
         }
-        let action = config.get(
-            &format!("wrapper.on_exit.{exit}"),
-            config.get(
-                "wrapper.on_exit.default",
-                if exit == 0 { "SHUTDOWN" } else { "RESTART" },
-            ),
-        );
-        if !restart
-            && (action.eq_ignore_ascii_case("SHUTDOWN")
-                || config.boolean("wrapper.restart.disabled", false))
-        {
-            log.close();
+        // An exit, crash or timeout stops the wrapper. Only an explicit JVM
+        // restart request starts another invocation, with no retry limit.
+        if !restart {
             return Ok(exit);
         }
-        if !restart {
-            if started.elapsed()
-                >= Duration::from_secs(config.number("wrapper.successful_invocation_time", 300)?)
-            {
-                failures = 0;
-            }
-            failures += 1;
-            if failures >= config.number("wrapper.max_failed_invocations", 5)? {
-                log.message("JVM failed repeatedly; giving up");
-                log.close();
-                return Ok(if exit == 0 { 1 } else { exit });
-            }
-        } else {
-            failures = 0;
-        }
         log.message("Restarting JVM (configuration will be reloaded)");
-        log.close();
         let delay = Instant::now();
         while delay.elapsed() < Duration::from_secs(config.number("wrapper.restart.delay", 5)?) {
             if signaled.load(Ordering::SeqCst) || STOP.load(Ordering::SeqCst) {
@@ -612,6 +595,26 @@ fn run_instance(
                 }
             }
             thread::sleep(Duration::from_millis(25));
+        }
+        if initial.boolean("wrapper.restart.reload_configuration", true) {
+            config = options.load()?;
+            ensure!(
+                config.pid_file() == initial.pid_file(),
+                "Changing wrapper.name or wrapper.pidfile requires stopping the wrapper"
+            );
+            #[cfg(unix)]
+            ensure!(
+                config.user() == initial.user(),
+                "Changing wrapper.daemon.user or RUN_AS_USER requires stopping the wrapper"
+            );
+            // Finish any pending rotation before opening the next log file.
+            log.flush();
+            let next = Log::with_startup(
+                &config,
+                options.command != "daemon" && options.command != "service",
+                log.startup.clone(),
+            )?;
+            std::mem::replace(log, next).close();
         }
     }
 }

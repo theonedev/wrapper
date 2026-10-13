@@ -142,18 +142,39 @@ fn status(state: ServiceState, checkpoint: u32, code: u32) -> ServiceStatus {
     }
 }
 
-fn service_main(_: Vec<OsString>) {
-    if let Err(error) = run_service()
-        && let Some(options) = OPTIONS.get()
-        && let Ok(config) = options.load()
-        && let Ok(log) = crate::logging::Log::new(&config, false)
+fn service_main(arguments: Vec<OsString>) {
+    let startup = if arguments
+        .get(1)
+        .is_some_and(|arg| arg == "--startup-notify")
     {
-        log.message(&format!("Service failed: {error:#}"));
-        log.close();
+        arguments
+            .get(2)
+            .and_then(|arg| arg.to_str())
+            .and_then(|port| port.parse().ok())
+            .zip(arguments.get(3).and_then(|arg| arg.to_str()))
+            .and_then(|(port, token)| crate::startup::Capture::connect(port, token).ok())
+    } else {
+        None
+    };
+    if let Err(error) = run_service(startup.clone()) {
+        let message = format!("Service failed: {error:#}");
+        if let Some(startup) = &startup {
+            startup.record(message.as_bytes());
+        }
+        if let Some(options) = OPTIONS.get()
+            && let Ok(config) = options.load()
+            && let Ok(log) = crate::logging::Log::new(&config, false)
+        {
+            log.message(&message);
+            log.close();
+        }
+    }
+    if let Some(startup) = startup {
+        let _ = startup.finish();
     }
 }
 
-fn run_service() -> Result<()> {
+fn run_service(startup: Option<crate::startup::Capture>) -> Result<()> {
     let options = OPTIONS.get().context("Missing service options")?;
     let config = options.load()?;
     let state = Arc::new(Mutex::new(ServiceState::StartPending));
@@ -186,32 +207,36 @@ fn run_service() -> Result<()> {
         }
     });
     let mut ever_running = false;
-    let result = supervisor::run(options, |event| {
-        let current = match event {
-            State::Starting if ever_running => ServiceState::Running,
-            State::Starting => ServiceState::StartPending,
-            State::Running => {
-                ever_running = true;
-                ServiceState::Running
-            }
-            State::Stopping => ServiceState::StopPending,
-        };
-        let mut guard = state.lock().unwrap();
-        *guard = current;
-        handle.set_service_status(status(
-            current,
-            if matches!(
+    let result = supervisor::run(
+        options,
+        |event| {
+            let current = match event {
+                State::Starting if ever_running => ServiceState::Running,
+                State::Starting => ServiceState::StartPending,
+                State::Running => {
+                    ever_running = true;
+                    ServiceState::Running
+                }
+                State::Stopping => ServiceState::StopPending,
+            };
+            let mut guard = state.lock().unwrap();
+            *guard = current;
+            handle.set_service_status(status(
                 current,
-                ServiceState::StartPending | ServiceState::StopPending
-            ) {
-                1
-            } else {
-                0
-            },
-            0,
-        ))?;
-        Ok(())
-    });
+                if matches!(
+                    current,
+                    ServiceState::StartPending | ServiceState::StopPending
+                ) {
+                    1
+                } else {
+                    0
+                },
+                0,
+            ))?;
+            Ok(())
+        },
+        startup,
+    );
     stopped.store(true, Ordering::SeqCst);
     let _ = reporter.join();
     let code = match &result {
@@ -259,6 +284,7 @@ fn install(options: &Options, config: &Config) -> Result<i32> {
         println!("{} is already installed", config.name());
         return Ok(0);
     }
+    println!("Installing service...");
     let start_type = match config.get("wrapper.ntservice.starttype", "AUTO_START") {
         "AUTO_START" | "DELAY_START" => ServiceStartType::AutoStart,
         "DEMAND_START" => ServiceStartType::OnDemand,
@@ -305,7 +331,7 @@ fn install(options: &Options, config: &Config) -> Result<i32> {
         let _ = service.delete();
     }
     configure?;
-    println!("{} installed", config.name());
+    println!("Service installed");
     Ok(0)
 }
 fn nonempty(value: &str) -> Option<OsString> {
@@ -334,6 +360,7 @@ fn wait(service: &Service, desired: ServiceState, timeout: u64) -> Result<()> {
 }
 fn stop(config: &Config) -> Result<i32> {
     if let Some(service) = optional(config, ServiceAccess::STOP | ServiceAccess::QUERY_STATUS)? {
+        println!("Stopping service...");
         let state = service.query_status()?.current_state;
         if state != ServiceState::Stopped {
             if state != ServiceState::StopPending {
@@ -346,9 +373,10 @@ fn stop(config: &Config) -> Result<i32> {
                 if timeout == 0 { 0 } else { timeout + 15 },
             )?;
         }
+        println!("Service stopped");
         Ok(0)
     } else {
-        supervisor::stop(config)
+        supervisor::stop(config, false)
     }
 }
 pub fn manage(options: &Options, config: &Config) -> Result<i32> {
@@ -361,20 +389,51 @@ pub fn manage(options: &Options, config: &Config) -> Result<i32> {
             manage(&start, config)
         }
         "remove" => {
+            println!("Removing service...");
             stop(config)?;
             if let Some(service) = optional(config, ServiceAccess::DELETE)? {
                 service.delete()?;
             }
-            println!("{} removed", config.name());
+            println!("Service removed");
             Ok(0)
         }
         "start" => {
             let timeout = config.number("wrapper.startup.wait.timeout", 120)?;
             let service = open(config, ServiceAccess::START | ServiceAccess::QUERY_STATUS)?;
-            if service.query_status()?.current_state == ServiceState::Stopped {
-                service.start::<&str>(&[])?;
+            let state = service.query_status()?.current_state;
+            if state == ServiceState::Running {
+                println!("Service is already running");
+                return Ok(0);
             }
-            wait(&service, ServiceState::Running, timeout)?;
+            println!("Starting service...");
+            if state == ServiceState::Stopped {
+                let mut startup = crate::startup::SocketWait::new()?;
+                let [port, token] = startup.arguments()?;
+                service.start(&["--startup-notify", &port, &token])?;
+                super::wait_startup(timeout, || {
+                    if startup.poll()? {
+                        return Ok(true);
+                    }
+                    let state = service.query_status()?;
+                    if state.current_state == ServiceState::Stopped {
+                        // Drain a result sent just before SCM reported Stopped.
+                        if startup.poll()? {
+                            return Ok(true);
+                        }
+                        // TCP may split a diagnostic across multiple reads even
+                        // after the service has finished writing it.
+                        if !startup.has_pending() {
+                            bail!("Service failed to start: {:?}", state.exit_code);
+                        }
+                    }
+                    Ok(false)
+                })?;
+            } else {
+                // Another caller (or boot) initiated this startup. SCM marks the
+                // service Running only after the same JVM handshake.
+                wait(&service, ServiceState::Running, timeout)?;
+                println!("Service started");
+            }
             Ok(0)
         }
         "stop" => stop(config),
@@ -395,13 +454,13 @@ pub fn manage(options: &Options, config: &Config) -> Result<i32> {
         "status" => {
             if let Some(service) = optional(config, ServiceAccess::QUERY_STATUS)? {
                 let state = service.query_status()?.current_state;
-                println!("{}: {state:?}", config.name());
+                println!("{}", format!("{state:?}").to_ascii_uppercase());
                 Ok(if state == ServiceState::Stopped { 3 } else { 0 })
             } else if let Some(state) = supervisor::request(config, "status")? {
-                println!("{}: {state}", config.name());
+                println!("{state}");
                 Ok(0)
             } else {
-                println!("{}: not installed", config.name());
+                println!("STOPPED");
                 Ok(3)
             }
         }

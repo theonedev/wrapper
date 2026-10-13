@@ -3,7 +3,6 @@ mod config;
 mod java;
 mod logging;
 mod service;
-#[cfg(unix)]
 mod startup;
 mod supervisor;
 
@@ -70,9 +69,6 @@ impl Options {
                 options
                     .overrides
                     .push(format!("wrapper.name=command-{script}"));
-                options
-                    .overrides
-                    .push("wrapper.restart.disabled=TRUE".into());
                 options.arguments.push(script);
             }
             // Script arguments are always application arguments, never evaluated as shell code.
@@ -92,7 +88,7 @@ impl Options {
                 "-it" => Some("installstart"),
                 "console" | "daemon" | "service" | "start" | "stop" | "restart" | "status"
                 | "install" | "remove" | "installstart" | "condrestart" | "dump" | "check"
-                | "render-service" => Some(args[0].as_str()),
+                | "render-service" | "startup-path" => Some(args[0].as_str()),
                 _ => None,
             };
             if let Some(command) = command {
@@ -161,13 +157,27 @@ impl Options {
 fn run() -> Result<i32> {
     let args: Vec<String> = env::args().skip(1).collect();
     if args == ["--version"] {
-        println!("ServiceWrapper {}", env!("CARGO_PKG_VERSION"));
+        println!("Wrapper {}", env!("CARGO_PKG_VERSION"));
         return Ok(0);
+    }
+    #[cfg(unix)]
+    if args.first().is_some_and(|arg| arg == "--startup-path-as") {
+        ensure!(args.len() >= 3, "Missing service account or launcher");
+        return service::startup_path_as(&args[1], &args[2..]);
     }
     let options = Options::parse(args)?;
     let config = options.load()?;
     match options.command.as_str() {
-        "console" | "daemon" => supervisor::run(&options, |_| Ok(())),
+        "console" | "daemon" => supervisor::run(&options, |_| Ok(()), None),
+        #[cfg(unix)]
+        "startup-path" => {
+            service::switch_user(&config)?;
+            println!(
+                "WrapperStartupPath={}",
+                startup::path(&options.load()?).display()
+            );
+            Ok(0)
+        }
         "service" => service::dispatch(&options, &config),
         "check" => {
             java::command(&config, &options.arguments, 0, "", || Ok(false))?;
@@ -188,7 +198,7 @@ fn main() {
     let code = match run() {
         Ok(code) => code,
         Err(error) => {
-            eprintln!("ServiceWrapper: {error:#}");
+            eprintln!("Wrapper: {error:#}");
             1
         }
     };

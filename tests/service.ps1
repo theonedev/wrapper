@@ -2,8 +2,8 @@
 # Uses a unique service name and always attempts removal in finally.
 $ErrorActionPreference = 'Stop'
 $project = Split-Path $PSScriptRoot -Parent
-$root = Join-Path ([System.IO.Path]::GetTempPath()) "ServiceWrapper service test $PID"
-$name = "servicewrapper-test-$PID"
+$root = Join-Path ([System.IO.Path]::GetTempPath()) "Wrapper service test $PID"
+$name = "wrapper-test-$PID"
 $arch = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
 $binaryName = if ($arch -eq 'ARM64') { 'wrapper-windows-arm-64.exe' } else { 'wrapper-windows-x86-64.exe' }
 $java = (Get-Command java).Source
@@ -19,7 +19,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Fixture compilation failed' }
 $source = @"
 #encoding=UTF-8
 wrapper.name=$name
-wrapper.displayname=ServiceWrapper acceptance test $PID
+wrapper.displayname=Wrapper acceptance test $PID
 wrapper.java.command=$java
 wrapper.java.classpath.1=.
 wrapper.app.parameter.1=Fixture
@@ -42,6 +42,12 @@ function Wait-Event([string] $text) {
     } while ((Get-Date) -lt $until)
     throw "Timed out waiting for $text"
 }
+function Get-StartResult {
+    # Windows PowerShell can turn redirected native stderr into ErrorRecords.
+    $ErrorActionPreference = 'Continue'
+    $output = (& "$root/bin/service.bat" start 2>&1 | Out-String)
+    return @{ Output = $output; ExitCode = $LASTEXITCODE }
+}
 try {
     Invoke-Wrapper install
     foreach ($timeout in @('invalid', '-1')) {
@@ -60,6 +66,34 @@ try {
     if ((Get-Service $name).Status -ne 'Stopped') { throw 'SCM did not report Stopped' }
     if (@(Get-Content "$root/events" | Select-String '^stop ').Count -ne 2) { throw 'Shutdown hooks were not called' }
     Invoke-Wrapper start
+    Invoke-Wrapper stop
+    foreach ($logging in @('INFO', 'NONE')) {
+        foreach ($failure in @(
+            @{ Setting = "wrapper.java.command=$root/missing-java.exe"; Diagnostic = 'missing-java' },
+            @{ Setting = 'wrapper.java.additional.20=-Xmxinvalid-fixture-size'; Diagnostic = 'invalid-fixture-size' },
+            @{ Setting = 'wrapper.java.version.min=999'; Diagnostic = 'wrapper.java.version.min' }
+        )) {
+            $content = $source + "`nwrapper.logfile.loglevel=$logging`n" + $failure.Setting + "`n"
+            [System.IO.File]::WriteAllText($config, $content, [System.Text.UTF8Encoding]::new($false))
+            $result = Get-StartResult
+            $output = $result.Output
+            if ($result.ExitCode -eq 0) { throw "Startup failure reported success: $output" }
+            if (!$output.Contains('Starting service...') -or !$output.Contains($failure.Diagnostic) -or $output.Contains('Service started')) {
+                throw "Missing terminal startup diagnostic: $output"
+            }
+            $until = (Get-Date).AddSeconds(15)
+            while ((Get-Service $name).Status -ne 'Stopped') {
+                if ((Get-Date) -gt $until) { throw 'Failed service did not stop' }
+                Start-Sleep -Milliseconds 100
+            }
+        }
+    }
+    [System.IO.File]::WriteAllText($config, $source, [System.Text.UTF8Encoding]::new($false))
+    $result = Get-StartResult
+    $output = $result.Output
+    if ($result.ExitCode -ne 0 -or !$output.Contains('Starting service...') -or !$output.Contains('Service started')) {
+        throw "Missing startup confirmation: $output"
+    }
     Invoke-Wrapper stop
     Write-Host 'Windows service acceptance test passed'
 } finally {

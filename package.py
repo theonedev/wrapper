@@ -39,7 +39,7 @@ def notices():
         packages.update({p["id"]: p for p in metadata["packages"]})
     parts = [(ROOT / "LICENSE").read_text()]
     for package in sorted(packages.values(), key=lambda p: (p["name"], p["version"])):
-        if package["name"] == "servicewrapper":
+        if package["name"] == "wrapper":
             continue
         directory = Path(package["manifest_path"]).parent
         texts = []
@@ -67,9 +67,9 @@ def main():
     for name, (kind, machine) in TARGETS.items():
         verify(source / name, kind, machine)
     with zipfile.ZipFile(source / "wrapper.jar") as jar:
-        assert "org/servicewrapper/WrapperManager.class" in jar.namelist()
+        assert "io/onedev/wrapper/WrapperManager.class" in jar.namelist()
     license_text = notices()
-    destination = (args.destination or ROOT / "dist/release/servicewrapper").resolve()
+    destination = (args.destination or ROOT / "dist/release/wrapper").resolve()
     boot = destination / "boot"
     boot.mkdir(parents=True, exist_ok=True)
     for name in [*TARGETS, "wrapper.jar"]:
@@ -95,13 +95,13 @@ def main():
         for file in sorted(destination.rglob("*")) if file.is_file() and file.name != "SHA256SUMS"))
     if args.archive:
         args.archive.mkdir(parents=True, exist_ok=True)
-        name = f"servicewrapper-{version}"
+        name = f"wrapper-{version}"
         archive = args.archive / (name + ".tar.gz")
         with tarfile.open(archive, "w:gz") as output:
             output.add(destination, arcname=name)
         archive.with_suffix(archive.suffix + ".sha256").write_text(
             f"{hashlib.sha256(archive.read_bytes()).hexdigest()}  {archive.name}\n")
-    print(f"Packaged ServiceWrapper {version} for all five targets in {destination}")
+    print(f"Packaged Wrapper {version} for all five targets in {destination}")
 
 
 if __name__ == "__main__":
