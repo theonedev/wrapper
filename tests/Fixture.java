@@ -4,10 +4,23 @@ import java.nio.file.StandardOpenOption;
 import io.onedev.wrapper.WrapperManager;
 
 public class Fixture {
+    private static void checkShare() throws Exception {
+        String directory = System.getProperty("fixture.share");
+        if (directory != null) {
+            Path file = Files.createTempFile(Path.of(directory), "wrapper-fixture-", ".tmp");
+            try {
+                Files.writeString(file, "share is writable");
+            } finally {
+                Files.deleteIfExists(file);
+            }
+        }
+    }
+
     public static void main(String[] args) throws Exception {
         Path root = Path.of(System.getProperty("fixture.root"));
         String value = System.getProperty("fixture.value", "unset");
         long pid = ProcessHandle.current().pid();
+        checkShare();
         Files.writeString(root.resolve("events"), "start " + pid + " " + value + "\n",
                 StandardOpenOption.CREATE, StandardOpenOption.APPEND);
         Thread main = Thread.currentThread();
@@ -19,6 +32,7 @@ public class Fixture {
                     Thread.sleep(60000);
                 if ("throw".equals(System.getProperty("fixture.mode")))
                     main.join();
+                checkShare();
                 Files.writeString(root.resolve("events"), "stop " + pid + "\n", StandardOpenOption.APPEND);
             } catch (Exception e) {
                 throw new RuntimeException(e);

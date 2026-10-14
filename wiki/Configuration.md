@@ -68,6 +68,7 @@ Use UTF-8. The file is a properties format, not a shell script.
 | `wrapper.working.dir`, `wrapper.pidfile` | JVM working directory and PID/control-file location |
 | `wrapper.daemon.user`, `wrapper.script` | Unix account and launcher |
 | `wrapper.ntservice.account`, `wrapper.ntservice.password`, `wrapper.ntservice.dependency.N`, `wrapper.ntservice.starttype` | Windows account, dependencies, and startup policy |
+| `wrapper.share.N.*` | Windows network drive/printer mappings, credentials, startup policies and shutdown cleanup |
 | `wrapper.console.loglevel`, `wrapper.logfile`, `wrapper.logfile.loglevel`, `wrapper.logfile.maxsize`, `wrapper.logfile.maxfiles` | Output destinations and rotation |
 | `wrapper.startup.timeout`, `wrapper.startup.wait.timeout`, `wrapper.shutdown.timeout` | JVM startup, command wait, and shutdown limits in seconds; `0` means unlimited |
 | `wrapper.restart.delay`, `wrapper.restart.reload_configuration` | Delay and configuration reload for application-requested restarts |
@@ -151,6 +152,9 @@ auto-bitness, and sequence-gap settings are also inert. Automatic crash restart,
 JVM responsiveness monitoring, pause/resume, and arbitrary `WrapperListener`
 integrations are not implemented.
 
-Active share/filter/event/timer properties and interactive Windows services fail
+Windows share settings from JSW 3.5.51 are supported; see
+[network shares](Services.md#windows-network-shares). Later background share
+mapping/actions are not supported. Active share properties on Unix, unknown share
+properties, filter/event/timer properties and interactive Windows services fail
 with a diagnostic. Other unknown properties are ignored for compatibility;
 check spelling against the commented template when a setting has no effect.

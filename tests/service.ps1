@@ -29,6 +29,23 @@ wrapper.shutdown.timeout=10
 wrapper.restart.delay=0
 wrapper.ntservice.starttype=DEMAND_START
 "@
+if ($env:WRAPPER_TEST_SHARE) {
+    # Optional SMB acceptance in SCM's logon session. Use a disposable writable
+    # share accessible to LocalSystem, and a drive not used by another service.
+    $share = $env:WRAPPER_TEST_SHARE.Replace('#', '##')
+    $drive = if ($env:WRAPPER_TEST_SHARE_DRIVE) { $env:WRAPPER_TEST_SHARE_DRIVE } else { 'W:' }
+    if ($drive -notmatch '^[A-Za-z]:$') { throw 'WRAPPER_TEST_SHARE_DRIVE must be a drive letter such as W:' }
+    $source += @"
+
+wrapper.share.1.location=$share
+wrapper.share.1.target=$drive
+wrapper.share.1.startup.failure=SHUTDOWN
+wrapper.share.1.startup.premapped=SHUTDOWN
+wrapper.share.1.startup.max_retries=1
+wrapper.share.1.shutdown.unmap=TRUE
+wrapper.java.additional.3=-Dfixture.share=$drive/
+"@
+}
 [System.IO.File]::WriteAllText($config, $source, [System.Text.UTF8Encoding]::new($false))
 function Invoke-Wrapper([string] $command) {
     & "$root/bin/service.bat" $command

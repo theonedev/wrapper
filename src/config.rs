@@ -63,8 +63,12 @@ impl Config {
         );
         // These require JSW's proprietary integrations. Never silently accept a setting we cannot implement.
         for key in config.values.keys() {
-            if key.starts_with("wrapper.share.")
-                || key.starts_with("wrapper.filter.")
+            #[cfg(not(windows))]
+            ensure!(
+                !key.starts_with("wrapper.share."),
+                "{key} is only supported on Windows"
+            );
+            if key.starts_with("wrapper.filter.")
                 || key.starts_with("wrapper.event.")
                 || key.starts_with("wrapper.timer.")
             {
@@ -73,6 +77,8 @@ impl Config {
                 );
             }
         }
+        #[cfg(windows)]
+        crate::shares::parse(&config)?;
         ensure!(
             !config.boolean("wrapper.ntservice.interactive", false),
             "Interactive Windows services are not supported"

@@ -113,6 +113,13 @@ impl Log {
             .sender
             .send(Entry::Output(format!("Wrapper: {text}\n").into_bytes()));
     }
+    #[cfg(windows)]
+    pub fn reporter(&self) -> impl Fn(&str) + use<> {
+        let sender = self.sender.clone();
+        move |text| {
+            let _ = sender.send(Entry::Output(format!("Wrapper: {text}\n").into_bytes()));
+        }
+    }
     pub fn error(&self, text: &str) {
         let _ = self
             .sender

@@ -411,6 +411,30 @@ fn run_logged(
             handler.store(true, Ordering::SeqCst);
         })?;
     }
+    // Map once for the supervisor's lifetime, retaining drives across JVM restarts.
+    // Drop runs on every exit path, after the last JVM and its shutdown hooks.
+    #[cfg(windows)]
+    let mut shares = crate::shares::Mappings::new(crate::shares::Network, log.reporter());
+    #[cfg(windows)]
+    {
+        state_changed(State::Starting)?;
+        if !shares.connect(crate::shares::parse(&initial)?, |delay| {
+            let started = Instant::now();
+            loop {
+                if startup_cancelled(&signaled, &listener, &mut pending, &token)? {
+                    return Ok(true);
+                }
+                let remaining = delay.saturating_sub(started.elapsed());
+                if remaining.is_zero() {
+                    return Ok(false);
+                }
+                thread::sleep(remaining.min(Duration::from_millis(100)));
+            }
+        })? {
+            state_changed(State::Stopping)?;
+            return Ok(0);
+        }
+    }
     let mut config = initial.clone();
     loop {
         if signaled.load(Ordering::SeqCst) || STOP.load(Ordering::SeqCst) {
@@ -418,19 +442,7 @@ fn run_logged(
         }
         state_changed(State::Starting)?;
         let command = java::command(&config, &options.arguments, port, &token, || {
-            if signaled.load(Ordering::SeqCst) || STOP.load(Ordering::SeqCst) {
-                return Ok(true);
-            }
-            if let Some((mut stream, message)) = next_message(&listener, &mut pending)? {
-                if message == format!("{token} stop") {
-                    let _ = stream.write_all(b"OK\n");
-                    return Ok(true);
-                }
-                if message == format!("{token} status") {
-                    let _ = stream.write_all(b"STARTING\n");
-                }
-            }
-            Ok(false)
+            startup_cancelled(&signaled, &listener, &mut pending, &token)
         })?;
         let Some(mut command) = command else {
             state_changed(State::Stopping)?;
@@ -614,7 +626,30 @@ fn run_logged(
                 options.command != "daemon" && options.command != "service",
                 log.startup.clone(),
             )?;
+            #[cfg(windows)]
+            shares.set_reporter(next.reporter());
             std::mem::replace(log, next).close();
         }
     }
+}
+
+fn startup_cancelled(
+    signaled: &AtomicBool,
+    listener: &TcpListener,
+    pending: &mut Vec<Pending>,
+    token: &str,
+) -> Result<bool> {
+    if signaled.load(Ordering::SeqCst) || STOP.load(Ordering::SeqCst) {
+        return Ok(true);
+    }
+    if let Some((mut stream, message)) = next_message(listener, pending)? {
+        if message == format!("{token} stop") {
+            let _ = stream.write_all(b"OK\n");
+            return Ok(true);
+        }
+        if message == format!("{token} status") {
+            let _ = stream.write_all(b"STARTING\n");
+        }
+    }
+    Ok(false)
 }

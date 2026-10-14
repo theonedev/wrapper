@@ -3,6 +3,8 @@ mod config;
 mod java;
 mod logging;
 mod service;
+#[cfg(any(windows, test))]
+mod shares;
 mod startup;
 mod supervisor;
 #[cfg(target_os = "linux")]

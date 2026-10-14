@@ -66,6 +66,54 @@ Windows startup defaults to `wrapper.ntservice.starttype=AUTO_START`.
 `wrapper.ntservice.dependency.N` entries identify Windows services or load-order
 groups to start first. Reinstall after changing registration settings.
 
+## Windows network shares
+
+Use `wrapper.share.N.*` to map a network drive or printer in the same logon session
+as the wrapper and JVM. It works in console and installed service mode. A drive
+mapped in an interactive desktop session may not be visible to a Windows service.
+
+```properties
+wrapper.share.1.location=\\fileserver\data
+wrapper.share.1.target=Z:
+wrapper.share.1.type=DISK
+wrapper.share.1.startup.failure=SHUTDOWN
+wrapper.share.1.startup.premapped=SHUTDOWN
+wrapper.share.1.shutdown.unmap=TRUE
+```
+
+The default uses the process account's network credentials. For separate share
+credentials, set `wrapper.share.1.account` and `wrapper.share.1.password` in a
+protected configuration file; environment references such as `%SHARE_PASSWORD%`
+are supported. These credentials are needed at each wrapper startup, unlike the
+SCM service-account password used only for installation. Network provider and
+service-account restrictions still apply, including conflicting credentials for
+connections to the same server. Credentials are passed directly to Windows APIs,
+without a command shell or interactive authentication prompt.
+
+| Property suffix | Behavior and default |
+| --- | --- |
+| `location`, `target` | Required UNC path and drive letter (`Z:`) or printer port (`LPT1`). |
+| `type` | `ANY` (default, inferred from target), `DISK` or `PRINTER`. |
+| `account`, `password` | Optional credentials. Password is ignored without an account. |
+| `startup.failure` | `CONTINUE` (default) logs a mapping failure and launches Java; `SHUTDOWN` fails startup. |
+| `startup.premapped` | Separate `CONTINUE`/`SHUTDOWN` policy for an occupied target; default `CONTINUE`, including when the existing mapping matches. |
+| `startup.max_retries` | Total attempts for temporary network failures; default 5, with 0 allowing one attempt. Permanent errors are not retried. |
+| `startup.retry_interval` | Seconds between attempts; default 10. Stop requests interrupt the wait, but cannot interrupt an in-flight Windows networking call. |
+| `shutdown.unmap` | Default `FALSE`. When `TRUE`, disconnect mappings created by this wrapper after the JVM and its shutdown hooks finish, including on startup failure. |
+| `shutdown.unmap.force` | Default `FALSE`. Permit disconnection despite open files/jobs. |
+
+Existing mappings are never replaced or taken over for cleanup. Keep configuration,
+wrapper logs and PID/control files local: they are opened before mapping starts.
+Mappings survive JVM restarts, including configuration reloads; restart the entire
+wrapper to change share settings. `check` validates settings without mapping shares.
+Active share settings are rejected on Linux/macOS.
+
+These defaults follow JSW 3.5.51, as used by OneDev 16.8.8. JSW 3.5.52+ background
+mapping and actions are rejected rather than silently ignored. See the original
+[startup](https://wrapper.tanukisoftware.com/doc/english/prop-share-startup.html)
+and [shutdown](https://wrapper.tanukisoftware.com/doc/english/prop-share-shutdown.html)
+property references for the compatibility context.
+
 ## Logs and troubleshooting
 
 Application stdout/stderr go to `logs/console.log` by default. Configure rotation

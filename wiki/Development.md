@@ -155,6 +155,17 @@ and removal. Run them as administrator/root on disposable hosts. On a disposable
 Unix host, run `python3 tests/native-startup.py` as root for startup diagnostics,
 saved installation arguments, and service-account execution with mocked managers.
 
+Share policy unit tests use a fake network backend on every platform, covering
+retries, cancellation, pre-existing drives, partial startup failure and cleanup.
+To exercise real Windows mappings, set `WRAPPER_TEST_SHARE` to a disposable writable
+UNC share accessible to LocalSystem, and optionally `WRAPPER_TEST_SHARE_DRIVE`
+(default `W:`), before running `tests/service.ps1`. The test refuses an occupied
+target, checks share access at JVM startup and in shutdown hooks, restarts the JVM
+with configuration/log reload, then stops and starts the service again to verify
+unmapping. It creates and deletes temporary files on that share. Run it only on a
+disposable Windows host with an unused service-session drive letter. Without this
+environment variable, the usual service test does not touch network shares.
+
 Before releasing runtime changes, run native SCM, launchd, and systemd acceptance
 on the corresponding operating systems. Cross-compilation alone does not validate
 service-manager behavior. For documentation changes, follow the example's manual
