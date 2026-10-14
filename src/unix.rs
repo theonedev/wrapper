@@ -24,7 +24,10 @@ fn script(config: &Config) -> Result<PathBuf> {
 
 fn definition(config: &Config) -> PathBuf {
     if cfg!(target_os = "macos") {
-        PathBuf::from(format!("/Library/LaunchDaemons/{}.plist", config.name()))
+        PathBuf::from(format!(
+            "/Library/LaunchDaemons/{}.plist",
+            config.launchd_label()
+        ))
     } else {
         PathBuf::from(format!("/etc/systemd/system/{}.service", config.name()))
     }
@@ -40,14 +43,14 @@ fn checked(command: &mut Command) -> Result<()> {
 }
 fn is_loaded(config: &Config) -> bool {
     Command::new("launchctl")
-        .args(["print", &format!("system/{}", config.name())])
+        .args(["print", &format!("system/{}", config.launchd_label())])
         .output()
         .is_ok_and(|o| o.status.success())
 }
 
 fn launchd_pid(config: &Config) -> Result<Option<u32>> {
     let output = Command::new("launchctl")
-        .args(["print", &format!("system/{}", config.name())])
+        .args(["print", &format!("system/{}", config.launchd_label())])
         .output()
         .context("Querying launchd service")?;
     // launchctl returns 113 when the service is not loaded.
@@ -71,7 +74,7 @@ fn stop_launchd(config: &Config) -> Result<()> {
         checked(Command::new("launchctl").args([
             "kill",
             "SIGTERM",
-            &format!("system/{}", config.name()),
+            &format!("system/{}", config.launchd_label()),
         ]))?;
         // The wrapper applies its own shutdown timeout, including unlimited waits.
         // Use launchd's PID because installed overrides may change the PID-file path.
@@ -118,7 +121,7 @@ pub fn render(options: &Options, config: &Config) -> Result<String> {
     if cfg!(target_os = "macos") {
         let mut result = format!(
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\n<key>Label</key><string>{}</string>\n<key>ProgramArguments</key><array>{}</array>\n<key>RunAtLoad</key><true/>\n<key>KeepAlive</key><false/>\n<key>ExitTimeOut</key><integer>{}</integer>\n",
-            xml(config.name()),
+            xml(config.launchd_label()),
             args.iter()
                 .map(|arg| format!("<string>{}</string>", xml(arg)))
                 .collect::<String>(),
@@ -298,7 +301,7 @@ fn native(options: &Options, config: &Config) -> Result<Option<i32>> {
                 config.name()
             );
         }
-        let target = format!("system/{}", config.name());
+        let target = format!("system/{}", config.launchd_label());
         match command {
             "start" => {
                 start_native(options, config)?;
@@ -421,7 +424,7 @@ fn start_native(options: &Options, config: &Config) -> Result<()> {
             if is_loaded(config) {
                 checked(
                     Command::new("launchctl")
-                        .args(["kickstart", &format!("system/{}", config.name())]),
+                        .args(["kickstart", &format!("system/{}", config.launchd_label())]),
                 )?;
             } else {
                 checked(

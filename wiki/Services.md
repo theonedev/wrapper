@@ -32,13 +32,27 @@ service. Removal unregisters it; your application files remain in place.
 | Platform | Registration | Native inspection |
 | --- | --- | --- |
 | Linux | systemd unit `<wrapper.name>.service`; SysV fallback when systemd is not running | `systemctl status my-app.service`, `journalctl -u my-app.service` |
-| macOS | System launchd daemon in `/Library/LaunchDaemons/`; label is `wrapper.name` | `sudo launchctl print system/my-app` |
+| macOS | System launchd daemon in `/Library/LaunchDaemons/`; label is `wrapper.launchd.label` (defaults to `wrapper.name`) | `sudo launchctl print system/my-app` |
 | Windows | Windows SCM service named `wrapper.name` | Services app or `sc.exe query my-app` |
 
 On Unix, `start` without registration runs a detached process; it does not enable
 startup at boot. Windows requires installation before `start`. `installstart`
 combines installation and startup; `condrestart` restarts only an active instance.
 See the [command reference](Configuration.md#commands) for the full list.
+
+## macOS launchd label
+
+Set `wrapper.launchd.label=com.example.my-app` to choose a macOS label independently
+of `wrapper.name`. This registers `/Library/LaunchDaemons/com.example.my-app.plist`
+and uses `system/com.example.my-app` for launchctl operations. The value accepts
+1 to 128 ASCII letters, digits, dots, underscores or hyphens. When omitted, the
+label remains `wrapper.name`. Linux and Windows ignore this property; default
+PID/control filenames still use `wrapper.name` on every platform.
+
+For an existing service, stop and remove it using its old label before changing
+this setting, then install and start it again. Changing the setting does not
+rename an existing registration. To retain a JSW registration during migration,
+set this property to its existing launchd label, including any JSW prefix.
 
 ## Service accounts
 

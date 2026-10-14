@@ -61,6 +61,7 @@ Use UTF-8. The file is a properties format, not a shell script.
 | Settings | Purpose |
 | --- | --- |
 | `wrapper.name`, `wrapper.displayname`, `wrapper.description` | Service identity and native registration labels |
+| `wrapper.launchd.label` | macOS launchd label and plist filename stem; defaults to `wrapper.name`; ignored on Linux/Windows |
 | `wrapper.java.command`, `wrapper.java.version.min`, `wrapper.java.mainclass` | Java executable, minimum version, and application entry point |
 | `wrapper.java.classpath.N`, `wrapper.java.additional.N`, `wrapper.app.parameter.N` | Classpath entries, JVM options, and application arguments |
 | `wrapper.java.initmemory`, `wrapper.java.maxmemory` | Heap sizes in MiB (`0` leaves the JVM option unset) |
@@ -142,8 +143,9 @@ and cancellable.
 Wrapper implements a main-class service lifecycle, with no JNI dependency.
 Existing systemd `start sysd`, launchd `launchdinternal`, Windows `-s <config>`,
 and launcher `.shconf` conventions remain supported. `wrapper.name` identifies
-the service on every platform; stop/remove using the old configuration before
-changing it during migration.
+the service on every platform unless `wrapper.launchd.label` overrides the macOS
+identity. Stop/remove using the old configuration before changing either identity
+during migration.
 
 Unsupported settings such as `wrapper.on_exit.*`, `wrapper.max_failed_invocations`,
 `wrapper.successful_invocation_time`, and `wrapper.restart.disabled` have no effect.

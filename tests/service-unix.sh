@@ -23,6 +23,7 @@ javac --release 17 -cp "$TEST_ROOT/boot/wrapper.jar" -d "$TEST_ROOT/boot" "$PROJ
 cat > "$CONFIG" <<EOF
 #encoding=UTF-8
 wrapper.name=$TEST_NAME
+wrapper.launchd.label=io.onedev.$TEST_NAME
 wrapper.java.command=$(command -v java)
 wrapper.java.classpath.1=.
 wrapper.app.parameter.1=Fixture

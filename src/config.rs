@@ -61,6 +61,16 @@ impl Config {
                     .any(|c| c.is_control() || "\\/:*?\"<>|".contains(c)),
             "wrapper.name must be a valid Windows service and file name"
         );
+        #[cfg(target_os = "macos")]
+        ensure!(
+            !config.launchd_label().is_empty()
+                && config.launchd_label().len() <= 128
+                && config
+                    .launchd_label()
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || b"_.-".contains(&c)),
+            "wrapper.launchd.label must contain 1 to 128 letters, digits, _, - or ."
+        );
         // These require JSW's proprietary integrations. Never silently accept a setting we cannot implement.
         for key in config.values.keys() {
             #[cfg(not(windows))]
@@ -186,6 +196,10 @@ impl Config {
     }
     pub fn name(&self) -> &str {
         self.get("wrapper.name", "java-service")
+    }
+    #[cfg(unix)]
+    pub fn launchd_label(&self) -> &str {
+        self.get("wrapper.launchd.label", self.name())
     }
     pub fn working_dir(&self) -> PathBuf {
         self.boot
