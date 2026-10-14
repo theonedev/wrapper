@@ -65,6 +65,54 @@ function Get-StartResult {
     $output = (& "$root/bin/service.bat" start 2>&1 | Out-String)
     return @{ Output = $output; ExitCode = $LASTEXITCODE }
 }
+function Test-StopDuringShareRetry {
+    # A missing share on the same server fails before Java starts. The long
+    # interval makes a prompt stop distinguishable from retry exhaustion.
+    $server = ($share -split '\\')[2]
+    $missing = '\\' + $server + '\wrapper-missing-' + [Guid]::NewGuid().ToString('N')
+    $retryLog = "$root/logs/share-retry.log"
+    $content = $source + @"
+
+wrapper.share.1.location=$missing
+wrapper.share.1.startup.max_retries=2
+wrapper.share.1.startup.retry_interval=30
+wrapper.logfile=$retryLog
+"@
+    [System.IO.File]::WriteAllText($config, $content, [System.Text.UTF8Encoding]::new($false))
+    $events = [System.IO.File]::ReadAllText("$root/events")
+    $starter = Start-Process -FilePath $binary -WindowStyle Hidden -PassThru `
+        -ArgumentList @('start', "`"$config`"") `
+        -RedirectStandardOutput "$root/retry-start.out" -RedirectStandardError "$root/retry-start.err"
+    try {
+        $until = (Get-Date).AddSeconds(45)
+        while (!(Test-Path $retryLog) -or !(Select-String -LiteralPath $retryLog -SimpleMatch 'retrying' -Quiet)) {
+            if ($starter.HasExited) {
+                $diagnostic = Get-Content "$root/retry-start.err" | Out-String
+                throw "Service exited before retrying: $diagnostic"
+            }
+            if ((Get-Date) -gt $until) { throw 'Timed out waiting for share retry' }
+            Start-Sleep -Milliseconds 100
+        }
+        if ((Get-Service $name).Status -ne 'StartPending') { throw 'Share retry did not keep SCM in StartPending' }
+        $timer = [Diagnostics.Stopwatch]::StartNew()
+        Invoke-Wrapper stop
+        $timer.Stop()
+        if ($timer.Elapsed.TotalSeconds -ge 10) { throw 'Stop did not interrupt the share retry wait' }
+        if ((Get-Service $name).Status -ne 'Stopped') { throw 'Stop returned before SCM reported Stopped' }
+        if (!$starter.WaitForExit(10000)) { throw 'Cancelled startup client did not exit' }
+        if ($starter.ExitCode -eq 0) { throw 'Cancelled startup reported success' }
+        if ([System.IO.File]::ReadAllText("$root/events") -ne $events) { throw 'Java started during cancelled share retry' }
+        if (@(Select-String -LiteralPath $retryLog -SimpleMatch 'retrying').Count -ne 1) { throw 'Unexpected additional share retry' }
+        Write-Host ('Stopping during SCM share startup retry passed ({0:N2}s)' -f $timer.Elapsed.TotalSeconds)
+    } finally {
+        if (!$starter.HasExited) {
+            # Bound cleanup even against a regressed binary that cannot cancel:
+            # this fixture exhausts its two attempts after one 30-second wait.
+            if (!$starter.WaitForExit(45000)) { Write-Warning 'Share retry startup client is still running' }
+        }
+        $starter.Dispose()
+    }
+}
 try {
     Invoke-Wrapper install
     foreach ($timeout in @('invalid', '-1')) {
@@ -84,6 +132,7 @@ try {
     if (@(Get-Content "$root/events" | Select-String '^stop ').Count -ne 2) { throw 'Shutdown hooks were not called' }
     Invoke-Wrapper start
     Invoke-Wrapper stop
+    if ($env:WRAPPER_TEST_SHARE) { Test-StopDuringShareRetry }
     foreach ($logging in @('INFO', 'NONE')) {
         foreach ($failure in @(
             @{ Setting = "wrapper.java.command=$root/missing-java.exe"; Diagnostic = 'missing-java' },
@@ -115,6 +164,11 @@ try {
     Write-Host 'Windows service acceptance test passed'
 } finally {
     & $binary remove $config
-    if ($LASTEXITCODE -eq 0) { Remove-Item -Recurse -Force $root }
+    if ($LASTEXITCODE -eq 0) {
+        $cleanupPath = [IO.Path]::GetFullPath($root)
+        $tempPrefix = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\') + '\'
+        if (!$cleanupPath.StartsWith($tempPrefix, [StringComparison]::OrdinalIgnoreCase)) { throw 'Test cleanup path is outside TEMP' }
+        Remove-Item -LiteralPath $cleanupPath -Recurse -Force
+    }
     else { Write-Warning "Service cleanup failed. Remove service $name and inspect $root." }
 }

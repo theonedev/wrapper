@@ -108,11 +108,9 @@ Mappings survive JVM restarts, including configuration reloads; restart the enti
 wrapper to change share settings. `check` validates settings without mapping shares.
 Active share settings are rejected on Linux/macOS.
 
-These defaults follow JSW 3.5.51, as used by OneDev 16.8.8. JSW 3.5.52+ background
-mapping and actions are rejected rather than silently ignored. See the original
-[startup](https://wrapper.tanukisoftware.com/doc/english/prop-share-startup.html)
-and [shutdown](https://wrapper.tanukisoftware.com/doc/english/prop-share-shutdown.html)
-property references for the compatibility context.
+Use `bin/service.bat stop` to interrupt share retries during service startup.
+Windows does not accept stop controls from the Services app or `sc.exe stop`
+while the service is in `StartPending`.
 
 ## Logs and troubleshooting
 

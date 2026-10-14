@@ -382,17 +382,35 @@ fn wait(service: &Service, desired: ServiceState, timeout: u64) -> Result<()> {
 fn stop(config: &Config) -> Result<i32> {
     if let Some(service) = optional(config, ServiceAccess::STOP | ServiceAccess::QUERY_STATUS)? {
         println!("Stopping service...");
-        let state = service.query_status()?.current_state;
-        if state != ServiceState::Stopped {
-            if state != ServiceState::StopPending {
-                service.stop()?;
+        let timeout = config.number("wrapper.shutdown.timeout", 30)?;
+        let start = Instant::now();
+        let mut requested = false;
+        loop {
+            let state = service.query_status()?.current_state;
+            if state == ServiceState::Stopped {
+                break;
             }
-            let timeout = config.number("wrapper.shutdown.timeout", 30)?;
-            wait(
-                &service,
-                ServiceState::Stopped,
-                if timeout == 0 { 0 } else { timeout + 15 },
-            )?;
+            if !requested {
+                match state {
+                    ServiceState::StartPending => {
+                        // SCM rejects Stop during startup. Use the authenticated
+                        // supervisor channel, which also interrupts share retry waits.
+                        // None can mean the service has not published its control
+                        // file yet; recheck SCM and retry instead of reporting success.
+                        requested = supervisor::request(config, "stop")?.is_some();
+                    }
+                    ServiceState::StopPending => requested = true,
+                    _ => {
+                        service.stop()?;
+                        requested = true;
+                    }
+                }
+            }
+            ensure!(
+                timeout == 0 || start.elapsed() < Duration::from_secs(timeout.saturating_add(15)),
+                "Timed out waiting for service; current state: {state:?}"
+            );
+            thread::sleep(Duration::from_millis(200));
         }
         println!("Service stopped");
         Ok(0)
