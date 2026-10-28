@@ -1,4 +1,10 @@
-use crate::{Options, child::ManagedChild, config::Config, java, logging::Log};
+use crate::{
+    Options,
+    child::{ManagedChild, reap_orphans},
+    config::Config,
+    java,
+    logging::Log,
+};
 use anyhow::{Context, Result, bail, ensure};
 use fs2::FileExt;
 use std::{
@@ -461,7 +467,7 @@ fn run_logged(
         let mut forced = false;
         let exit;
         loop {
-            if let Some(status) = jvm.child.try_wait()? {
+            if let Some(status) = jvm.try_wait()? {
                 exit = status.code().unwrap_or(1);
                 break;
             }
@@ -593,6 +599,7 @@ fn run_logged(
         log.message("Restarting JVM (configuration will be reloaded)");
         let delay = Instant::now();
         while delay.elapsed() < Duration::from_secs(config.number("wrapper.restart.delay", 5)?) {
+            reap_orphans(None)?;
             if signaled.load(Ordering::SeqCst) || STOP.load(Ordering::SeqCst) {
                 return Ok(0);
             }

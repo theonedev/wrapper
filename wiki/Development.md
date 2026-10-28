@@ -150,6 +150,12 @@ parent death, control authentication, logs, and launcher arguments. They do not
 register machine services. On Linux, also run `bash tests/linux-smoke.sh`; on other
 hosts it uses a disposable Java 17 container with the project mounted read-only.
 
+For Linux container PID 1 behavior, build the Linux target matching your Docker
+daemon and run `python3 tests/pid1.py`. It runs disposable containers without
+`--init`, checking orphan reaping, JVM exit codes, restarts, and SIGTERM shutdown.
+The default image is `eclipse-temurin:17-jdk-jammy`; set `WRAPPER_TEST_IMAGE` to
+use another Linux image containing Java 17+, `sh`, and `setsid`.
+
 `tests/service-unix.sh` and `tests/service.ps1` exercise real service installation
 and removal. Run them as administrator/root on disposable hosts. On a disposable
 Unix host, run `python3 tests/native-startup.py` as root for startup diagnostics,

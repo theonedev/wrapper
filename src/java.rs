@@ -37,16 +37,13 @@ pub fn command(
     let stderr = read_output(probe.child.stderr.take().unwrap());
     let started = Instant::now();
     let status = (|| -> Result<_> {
-        let mut status = None;
         loop {
             if cancelled()? {
                 return Ok(None);
             }
-            if status.is_none() {
-                status = probe.child.try_wait()?;
-                if status.is_some() {
-                    probe.kill();
-                }
+            let status = probe.try_wait()?;
+            if status.is_some() {
+                probe.kill();
             }
             if status.is_some() && stdout.is_finished() && stderr.is_finished() {
                 return Ok(status);
